@@ -48,17 +48,25 @@ const kraken = require('./krakenApiSetup');
         const orderId = await kraken.sellLimit(trade.pair, trade.quantity, stopPrice);
         if (orderId) {
           await db.run("UPDATE trades SET sellPrice = ? WHERE id = ?", [orderId, trade.id]);
+          console.log(`📌 Venta límite colocada para ${trade.pair} a ${stopPrice}`);
+        } else {
+          console.warn(`⚠️ No se pudo colocar orden límite para ${trade.pair}`);
         }
         continue;
       }
 
       // Vender a mercado si se alcanzó el stop real
       if (currentPrice <= stopPrice) {
-        const sellResult = await kraken.sell(trade.pair, trade.quantity);
-        const profit = ((currentPrice - trade.buyPrice) / trade.buyPrice) * 100;
-        await db.run("UPDATE trades SET status = 'completed', sellPrice = ?, profitPercent = ? WHERE id = ?", 
-                     [currentPrice, profit, trade.id]);
-        console.log(`✅ Trade vendido a mercado. ${trade.pair} ID: ${trade.id}`);
+        const orderId = await kraken.sell(trade.pair, trade.quantity);
+        if (orderId) {
+          const priceFinal = await kraken.getCurrentPrice(trade.pair);
+          const profit = ((priceFinal - trade.buyPrice) / trade.buyPrice) * 100;
+          await db.run("UPDATE trades SET status = 'completed', sellPrice = ?, profitPercent = ? WHERE id = ?", 
+                       [priceFinal, profit, trade.id]);
+          console.log(`✅ Venta a mercado ejecutada para ${trade.pair}. Precio: ${priceFinal}`);
+        } else {
+          console.error(`❌ Venta a mercado fallida para ${trade.pair}, trade sigue activo`);
+        }
       }
     }
   }
