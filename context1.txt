@@ -1,0 +1,868 @@
+Aquí tienes la primera versión del bot que hicimos que recibe mensajes de Traidingview con el par que debe comprar, el trailing al que debe vender.
+
+Versión 1.0
+
+const express = require('express');
+ const KrakenClient = require('kraken-api');
+ const axios = require('axios');
+ const dotenv = require('dotenv');
+ const sqlite3 = require('sqlite3').verbose();
+ const path = require('path');
+ 
+ // Configuración inicial
+ dotenv.config();
+ const app = express();
+ const PORT = process.env.PORT || 3000;
+ const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 180000;
+ const DB_PATH = '/data/trades.db';
+ 
+ // Validación de variables de entorno
+ const requiredEnvVars = ['API_KEY', 'API_SECRET'];
+ const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+ 
+ if (missingVars.length > 0) {
+   console.error(`❌ [${new Date().toISOString()}] Missing required environment variables: ${missingVars.join(', ')}`);
+   process.exit(1);
+ }
+ 
+ const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
+ const db = new sqlite3.Database(DB_PATH);
+ 
+ // Manejo de cierre limpio
+ process.on('SIGTERM', () => {
+   console.log('🛑 Recibió SIGTERM. Cerrando limpiamente...');
+   db.close((err) => { 
+     if (err) console.error('Error al cerrar DB:', err);
+   });
+   server.close(() => {
+     console.log('Servidor HTTP detenido');
+     process.exit(0);
+   });
+ });
+ 
+ // Crear tabla y migrar si es necesario
+ db.serialize(() => {
+   db.run(`
+     CREATE TABLE IF NOT EXISTS trades (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       pair TEXT NOT NULL,
+       quantity REAL NOT NULL,
+       stopPercent REAL,
+       highestPrice REAL,
+       buyPrice REAL,
+       buyOrderId TEXT NOT NULL,
+       sellPrice REAL,
+       profitPercent REAL,
+       status TEXT DEFAULT 'active',
+       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+     )
+   `);
+ 
+   db.all("PRAGMA table_info(trades)", (err, columns) => {
+     if (err) return console.error('❌ Error al leer columnas:', err);
+     const columnNames = columns.map(col => col.name);
+ 
+     if (!columnNames.includes('sellPrice')) {
+       db.run("ALTER TABLE trades ADD COLUMN sellPrice REAL");
+     }
+     if (!columnNames.includes('profitPercent')) {
+       db.run("ALTER TABLE trades ADD COLUMN profitPercent REAL");
+     }
+ 
+     db.all("SELECT * FROM trades WHERE status = 'completed' AND profitPercent IS NULL AND sellPrice IS NOT NULL AND buyPrice IS NOT NULL", (err, rows) => {
+       if (err) return console.error('❌ Error al actualizar profitPercent:', err);
+       rows.forEach(row => {
+         const profit = ((row.sellPrice - row.buyPrice) / row.buyPrice) * 100;
+         db.run("UPDATE trades SET profitPercent = ? WHERE id = ?", [profit, row.id]);
+         console.log(`📈 Trade ID ${row.id} actualizado con profitPercent: ${profit.toFixed(2)}%`);
+       });
+     });
+   });
+ });
+ 
+ app.use(express.json());
+ app.use((req, res, next) => {
+   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+   next();
+ });
+ 
+ function validateTradingPair(pair) {
+   if (typeof pair !== 'string') throw new Error('El par debe ser un string');
+   const cleanPair = pair.toUpperCase().replace(/[^A-Z0-9]/g, '');
+   const validCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'USDT'];
+   const endsWithValidCurrency = validCurrencies.some(currency => cleanPair.endsWith(currency));
+   if (!endsWithValidCurrency) throw new Error(`El par debe terminar con ${validCurrencies.join(', ')}`);
+   if (cleanPair.length < 5) throw new Error('El par debe tener al menos 5 caracteres');
+   return cleanPair;
+ }
+ 
+ function calculateQuantity(amount, price) {
+   const quantity = amount / price;
+   return Math.floor(quantity * 100000000) / 100000000;
+ }
+ 
+ app.post('/alerta', async (req, res) => {
+   try {
+     const { par, cantidad, trailingStopPercent } = req.body;
+     if (!par || !cantidad || !trailingStopPercent) return res.status(400).json({ error: 'Parámetros faltantes' });
+     const cleanPair = validateTradingPair(par);
+ 
+     // Verificar si ya hay un trade activo para este par
+ const existingTrade = await new Promise((resolve, reject) => {
+   db.get("SELECT * FROM trades WHERE pair = ? AND status = 'active' LIMIT 1", [cleanPair], (err, row) => {
+     if (err) return reject(err);
+     resolve(row);
+   });
+ });
+ 
+ if (existingTrade) {
+   console.log(`⚠️ Trade activo ya existente para ${cleanPair}. Se omite la compra.`);
+   return res.status(200).json({ status: 'skip', message: `Trade ya activo para ${cleanPair}` });
+ }
+     const currency = cleanPair.slice(-3);
+     const amount = parseFloat(cantidad);
+     if (isNaN(amount) || amount <= 0) throw new Error('"cantidad" debe ser un número positivo');
+     if (isNaN(trailingStopPercent) || trailingStopPercent <= 0 || trailingStopPercent >= 100) throw new Error('"trailingStopPercent" debe ser entre 0 y 100');
+     const ticker = await axios.get(`https://api.kraken.com/0/public/Ticker?pair=${cleanPair}`);
+     const currentPrice = parseFloat(ticker.data.result[cleanPair].c[0]);
+     const quantity = calculateQuantity(amount, currentPrice);
+     const order = await kraken.api('AddOrder', { pair: cleanPair, type: 'buy', ordertype: 'market', volume: quantity.toString() });
+     db.run(`INSERT INTO trades (pair, quantity, stopPercent, highestPrice, buyPrice, buyOrderId) VALUES (?, ?, ?, ?, ?, ?)`, [cleanPair, quantity, trailingStopPercent, currentPrice, currentPrice, order.result.txid[0]]);
+     console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${currentPrice} ${currency}`);
+     return res.status(200).json({ status: 'success', orderId: order.result.txid[0], pair: cleanPair, quantity, price: currentPrice, currency });
+   } catch (error) {
+     console.error(`❌ Error: ${error.message}`);
+     return res.status(500).json({ error: error.message });
+   }
+ });
+ 
+ setInterval(() => {
+   db.all("SELECT * FROM trades WHERE status = 'active'", (err, trades) => {
+     if (err) return console.error('Error al leer trades:', err);
+     trades.forEach(trade => checkTrade(trade));
+   });
+ }, CHECK_INTERVAL);
+ 
+ async function checkTrade(trade) {
+   try {
+     const ticker = await axios.get(`https://api.kraken.com/0/public/Ticker?pair=${trade.pair}`);
+     const currentPrice = parseFloat(ticker.data.result[trade.pair].c[0]);
+     const newHighestPrice = Math.max(trade.highestPrice, currentPrice);
+     if (newHighestPrice > trade.highestPrice) db.run("UPDATE trades SET highestPrice = ? WHERE id = ?", [newHighestPrice, trade.id]);
+     const stopPrice = newHighestPrice * (1 - trade.stopPercent / 100);
+     if (currentPrice <= stopPrice) {
+       const sellOrder = await kraken.api('AddOrder', { pair: trade.pair, type: 'sell', ordertype: 'market', volume: trade.quantity.toString() });
+       const profitPercent = ((currentPrice - trade.buyPrice) / trade.buyPrice) * 100;
+       db.run("UPDATE trades SET status = 'completed', sellPrice = ?, profitPercent = ? WHERE id = ?", [currentPrice, profitPercent, trade.id]);
+       console.log(`💰 VENTA: ${trade.quantity} ${trade.pair} @ ${currentPrice}`);
+     }
+   } catch (error) {
+     console.error(`⚠️ Error verificando trade ID ${trade.id} (${trade.pair}): ${error.message}`);
+   }
+ }
+ 
+ app.get('/status', (req, res) => {
+   db.get("SELECT COUNT(*) as active FROM trades WHERE status = 'active'", (err, row) => {
+     res.status(200).json({ status: 'running', activeTrades: row ? row.active : 0, uptime: process.uptime() });
+   });
+ });
+ 
+ app.get('/trades/active', (req, res) => {
+   db.all("SELECT * FROM trades WHERE status = 'active'", (err, rows) => {
+     if (err) return res.status(500).json({ error: err.message });
+     res.status(200).json(rows);
+   });
+ });
+ 
+ app.get('/trades/history', (req, res) => {
+   db.all("SELECT * FROM trades WHERE status = 'completed' ORDER BY createdAt DESC", (err, rows) => {
+     if (err) return res.status(500).json({ error: err.message });
+     res.status(200).json(rows);
+   });
+ });
+ 
+ app.get('/trades/summary', (req, res) => {
+   db.all("SELECT * FROM trades WHERE profitPercent IS NOT NULL", (err, rows) => {
+     if (err) return res.status(500).json({ error: err.message });
+     const total = rows.length;
+     const totalProfit = rows.reduce((acc, r) => acc + (r.profitPercent || 0), 0);
+     const avgProfit = total > 0 ? totalProfit / total : 0;
+     const winners = rows.filter(r => r.profitPercent > 0).length;
+     const losers = rows.filter(r => r.profitPercent <= 0).length;
+     res.status(200).json({ totalTrades: total, totalProfitPercent: totalProfit, averageProfitPercent: avgProfit, winners, losers });
+   });
+ });
+ 
+ app.get('/balance', async (req, res) => {
+   try {
+     const balance = await kraken.api('Balance');
+     console.log(`💰 Balance Kraken:`, balance.result);
+     res.status(200).json(balance.result);
+   } catch (error) {
+     console.error(`❌ Error obteniendo balance: ${error.message}`);
+     res.status(500).json({ error: 'Error obteniendo balance' });
+   }
+ });
+ 
+ app.post('/vender', async (req, res) => {
+   try {
+     const { par, cantidad } = req.body;
+     if (!par || !cantidad) return res.status(400).json({ error: 'Parámetros faltantes' });
+     const cleanPair = validateTradingPair(par);
+     const percent = parseFloat(cantidad);
+     if (isNaN(percent) || percent <= 0 || percent > 100) throw new Error('"cantidad" debe ser un porcentaje entre 0 y 100');
+ 
+     // 1. Busca el trade activo para este par
+     const activeTrade = await db.get(
+       "SELECT * FROM trades WHERE pair = ? AND status = 'active' LIMIT 1",
+       [cleanPair]
+     );
+     if (!activeTrade) throw new Error(`No hay trades activos para ${cleanPair}`);
+ 
+     // 2. Verifica balance y calcula volumen
+     const balance = await kraken.api('Balance');
+     const baseAsset = cleanPair.slice(0, -3); // "ACH" de "ACHEUR"
+     const available = parseFloat(balance.result[baseAsset] || '0');
+     const volume = Math.floor((available * percent / 100) * 100000000) / 100000000;
+     if (volume <= 0) throw new Error('Cantidad a vender demasiado baja');
+ 
+     // 3. Ejecuta venta en Kraken
+     const ticker = await axios.get(`https://api.kraken.com/0/public/Ticker?pair=${cleanPair}`);
+     const currentPrice = parseFloat(ticker.data.result[cleanPair].c[0]);
+     const order = await kraken.api('AddOrder', {
+       pair: cleanPair,
+       type: 'sell',
+       ordertype: 'market',
+       volume: volume.toString()
+     });
+ 
+     // 4. Actualiza el trade existente (DIFERENCIA CLAVE)
+     const profitPercent = ((currentPrice - activeTrade.buyPrice) / activeTrade.buyPrice) * 100;
+     await db.run(
+       `UPDATE trades 
+        SET status = 'completed', 
+            sellPrice = ?,
+            profitPercent = ?
+        WHERE id = ?`,
+       [currentPrice, profitPercent, activeTrade.id]
+     );
+ 
+     console.log(`💥 VENTA MANUAL: ${volume} ${baseAsset} (${percent}%) en ${cleanPair}`);
+     res.status(200).json({
+       status: 'venta ejecutada',
+       orderId: order.result.txid[0],
+       pair: cleanPair,
+       baseAsset,
+       cantidadVendida: volume,
+       porcentaje: percent
+     });
+   } catch (error) {
+     console.error(`❌ Error al vender: ${error.message}`);
+     res.status(500).json({ error: error.message });
+   }
+ });
+ 
+ app.get('/trades/all', (req, res) => {
+   db.all("SELECT * FROM trades ORDER BY createdAt DESC", (err, rows) => {
+     if (err) return res.status(500).json({ error: err.message });
+     res.status(200).json(rows);
+   });
+ });
+ 
+ app.get('/resumen', (req, res) => {
+   db.all(`
+     SELECT 
+       pair,
+       COUNT(*) AS total_trades,
+       SUM(profitPercent) AS total_profit_percent,
+       AVG(profitPercent) AS avg_profit_percent
+     FROM trades
+     WHERE status = 'completed' AND profitPercent IS NOT NULL
+     GROUP BY pair
+     ORDER BY total_profit_percent DESC
+   `, (err, rows) => {
+     if (err) return res.status(500).json({ error: err.message });
+ 
+     db.get("SELECT COUNT(*) AS total FROM trades", (err2, countRow) => {
+       if (err2) return res.status(500).json({ error: err2.message });
+ 
+       res.json({
+         totalTrades: countRow.total,
+         resumenPorMoneda: rows
+       });
+     });
+   });
+ });
+ 
+ app.get('/trades/detalle', (req, res) => {
+   db.all(`
+     SELECT 
+       id,
+       pair,
+       buyPrice,
+       sellPrice,
+       profitPercent,
+       datetime(createdAt) as buyTime,
+       (SELECT datetime(createdAt) FROM trades AS t2 WHERE t2.id > trades.id AND t2.pair = trades.pair AND t2.status = 'completed' ORDER BY t2.id LIMIT 1) AS sellTime
+     FROM trades
+     WHERE status = 'completed' AND profitPercent IS NOT NULL
+     ORDER BY id ASC
+   `, (err, rows) => {
+     if (err) return res.status(500).json({ error: err.message });
+     res.json(rows);
+   });
+ });
+ 
+ app.get('/sincronizar-completo', async (req, res) => {
+  try {
+    // Paso 1: Limpiar la base de datos existente
+    await new Promise((resolve, reject) => {
+      db.run("DELETE FROM trades", (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    console.log('✅ Base de datos limpiada');
+
+    // Paso 2: Obtener historial completo de Kraken
+    const tradesHistory = await kraken.api('TradesHistory');
+    const trades = tradesHistory.result.trades || {};
+    
+    console.log(`📊 ${Object.keys(trades).length} trades encontrados en Kraken`);
+
+    // Paso 3: Reconstruir la base de datos según el historial real
+    let compras = [];
+    let ventas = [];
+    
+    // Separar compras y ventas
+    for (const txid in trades) {
+      const t = trades[txid];
+      if (t.type === 'buy') {
+        compras.push(t);
+      } else if (t.type === 'sell') {
+        ventas.push(t);
+      }
+    }
+
+    // Procesar compras primero
+    for (const compra of compras) {
+      const pair = compra.pair.toUpperCase();
+      const time = new Date(compra.time * 1000).toISOString();
+      const price = parseFloat(compra.price);
+      const volume = parseFloat(compra.vol);
+      const cost = parseFloat(compra.cost);
+      const fee = parseFloat(compra.fee);
+
+      // Buscar si hay una venta correspondiente
+      const ventaCorrespondiente = ventas.find(v => 
+        v.pair.toUpperCase() === pair && 
+        parseFloat(v.vol) === volume &&
+        new Date(v.time * 1000) > new Date(compra.time * 1000)
+      );
+
+      if (ventaCorrespondiente) {
+        // Trade completo (compra + venta)
+        const sellPrice = parseFloat(ventaCorrespondiente.price);
+        const profitPercent = ((sellPrice - price) / price) * 100;
+        
+        await new Promise((resolve, reject) => {
+          db.run(
+            `INSERT INTO trades (
+              pair, quantity, stopPercent, highestPrice, buyPrice, 
+              buyOrderId, sellPrice, profitPercent, status, createdAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              pair, 
+              volume, 
+              2, // stopPercent por defecto
+              sellPrice, // highestPrice
+              price, 
+              compra.ordertxid || txid,
+              sellPrice,
+              profitPercent,
+              'completed',
+              time
+            ],
+            (err) => {
+              if (err) reject(err);
+              else resolve();
+            }
+          );
+        });
+      } else {
+        // Trade activo (solo compra)
+        await new Promise((resolve, reject) => {
+          db.run(
+            `INSERT INTO trades (
+              pair, quantity, stopPercent, highestPrice, buyPrice, 
+              buyOrderId, status, createdAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              pair, 
+              volume, 
+              2, // stopPercent por defecto
+              price, // highestPrice inicial
+              price, 
+              compra.ordertxid || txid,
+              'active',
+              time
+            ],
+            (err) => {
+              if (err) reject(err);
+              else resolve();
+            }
+          );
+        });
+      }
+    }
+
+    console.log('✅ Base de datos reconstruida según historial de Kraken');
+    res.json({
+      status: 'success',
+      message: 'Base de datos sincronizada completamente con Kraken',
+      tradesActivos: compras.length - ventas.length,
+      tradesCompletados: ventas.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error en sincronización completa:', error);
+    res.status(500).json({ 
+      error: error.message,
+      stack: error.stack 
+    });
+  }
+});
+ 
+ // Endpoint temporal para eliminar un trade por ID
+ app.delete('/trades/delete/:id', (req, res) => {
+   const id = parseInt(req.params.id);
+   if (isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
+ 
+   db.run("DELETE FROM trades WHERE id = ?", [id], function(err) {
+     if (err) return res.status(500).json({ error: err.message });
+     if (this.changes === 0) return res.status(404).json({ error: 'Trade no encontrado' });
+     res.status(200).json({ status: 'Trade eliminado', id });
+   });
+ });
+ 
+ const server = app.listen(PORT, () => {
+   console.log(`🚀 Server running on port ${PORT}`);
+   db.get("SELECT COUNT(*) as count FROM trades WHERE status = 'active'", (err, row) => {
+     if (row && row.count > 0) console.log(`🔍 ${row.count} trades activos encontrados`);
+   });
+ });
+
+Ejemplo de mensaje de alerta que enviaba Trading View: {"par":"ACXUSD", "cantidad":40, "trailingStopPercent":6}
+
+El bot en un principio lo tenia colgado en Railway, enlazado con un repositorio de Github: https://github.com/Juainit/bot-kraken/blob/main/bot.js
+
+La URL de Railway es: https://bot-kraken-production-ee86.up.railway.app/
+I los mensajes se enviaban a https://bot-kraken-production-ee86.up.railway.app/alerta
+
+Empezamos a crear una Base de Datos en SQLite, y a partir de ese momento, empezaron a salir transacciones como activas que en teoria ya estaban completadas, pares de monedas que se habian comprado, se habia aplicado la logica de trailing, y cuando se vendian segúian aparececiendo como “activas”. Igual es que Kraken activo es que una moneda ya se ha comprado y vendido una vez, y cuando programabamos el bot para que si una moneda estuviese en “activo” no se comprara otra vez. Por eso el bot no compraría en base a las alarmas que recibe de Tradingview.
+Ahora lo pienso y seria mejor hacer que si la moneda a la que hay que comprar (que ha recibido la alerta) si tiene un saldo >8 dolares o euros, pues que no compre, y entonces nos ahorramos problemas. 
+
+El caso es que borre el volumen de Railway con todos los datos. 
+Empecé de 0 con un assistente de OpenAI.
+queria que el nuevo bot reinvirtiera los beneficios/perdidas obtenidos en la anterior operación. que empezara con 40€/$ y que a aprtir de allí se moviese.
+
+Dividimos el bot en varias partes.
+
+Hemos creado una carpeta local con las distintas partes:
+
+
+
+archivo .env en donde aparecen los Secret API de Kraken.
+
+
+
+
+
+archivo krakenSync.js
+// Este archivo manejaría la lógica para sincronizar datos de Kraken
+require('dotenv').config();
+const axios = require('axios');
+const crypto = require('crypto');
+
+const apiKey = process.env.API_KEY;
+const apiSecret = process.env.API_SECRET;
+
+const apiRoot = 'https://api.kraken.com';
+const apiVersion = '/0';
+
+function getKrakenSignature(urlpath, request, secret) {
+    const message = request.nonce + request.body;
+    const secret_buffer = Buffer.from(secret, 'base64');
+    const hash_digest = crypto.createHash('sha256').update(message).digest();
+    const hmac = crypto.createHmac('sha512', secret_buffer).update(urlpath + hash_digest).digest('base64');
+
+    return hmac;
+}
+
+function buildHeaders(apiKey, apiSign) {
+    return {
+        'API-Key': apiKey,
+        'API-Sign': apiSign
+    };
+}
+
+async function getServerTime() {
+    const endpoint = '/public/Time';
+    try {
+        const response = await axios.get(`${apiRoot}${apiVersion}${endpoint}`);
+        console.log('Hora del servidor:', response.data);
+        return response.data;
+    } catch (error) {
+        console.error('Error al obtener la hora del servidor:', error);
+    }
+}
+
+async function getBalance() {
+    const endpoint = '/private/Balance';
+    const nonce = new Date() * 1000;
+    const postData = `nonce=${nonce}`;
+    const signature = getKrakenSignature(apiVersion + endpoint, { nonce: nonce, body: postData }, apiSecret);
+    const headers = buildHeaders(apiKey, signature);
+
+    try {
+        const response = await axios.post(`${apiRoot}${apiVersion}${endpoint}`, postData, { headers });
+        console.log('Balance de la cuenta:', response.data);
+        return response.data;
+    } catch (error) {
+        console.error('Error al obtener el balance:', error);
+    }
+}
+
+module.exports = {
+    getServerTime,
+    getBalance
+};
+
+
+
+
+Archivo krakenTime.js
+require('dotenv').config();
+const axios = require('axios');
+const crypto = require('crypto');
+
+const apiKey = process.env.API_KEY;
+const apiSecret = process.env.API_SECRET;
+
+const apiRoot = 'https://api.kraken.com';
+const apiVersion = '/0';
+const endpoint = '/public/Time'; // Endpoint para obtener el tiempo del servidor
+
+function getKrakenSignature(urlpath, request, secret, nonce) {
+    const message = nonce + request.body;
+    const secret_buffer = Buffer.from(secret, 'base64');
+    const hash_digest = crypto.createHash('sha256').update(message).digest();
+    const hmac = crypto.createHmac('sha512', secret_buffer).update(urlpath + hash_digest).digest('base64');
+
+    return hmac;
+}
+
+function buildHeaders(apiKey, apiSign) {
+    return {
+        'API-Key': apiKey,
+        'API-Sign': apiSign
+    };
+}
+
+const nonce = new Date() * 1000; // nonce como milisegundos desde la época UNIX
+const postData = `nonce=${nonce}`;
+
+const signature = getKrakenSignature(apiVersion + endpoint, { nonce: nonce, body: postData }, apiSecret);
+const headers = buildHeaders(apiKey, signature);
+
+// Realizar la petición POST a la API de Kraken
+axios.post(`${apiRoot}${apiVersion}${endpoint}`, postData, { headers })
+    .then(response => {
+        console.log('Respuesta de la API de Kraken:', response.data);  // Mostrar los datos obtenidos
+    })
+    .catch(error => {
+        console.error('Error al hacer la petición a Kraken:', error);  // Manejar errores
+    });
+
+
+
+Archivo package-lock.json
+
+
+
+archivo package.json
+{
+  "name": "bot-kraken-openai",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.8.4",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "sqlite3": "^5.1.7"
+  }
+}
+
+Archivo path_to_your_database.db. Es un documento vacío (0bytes)
+
+
+
+const express = require('express');
+const KrakenClient = require('kraken-api');
+const axios = require('axios');
+const dotenv = require('dotenv').config();
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+
+// Configurar cliente de Kraken
+const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
+
+// Configuración de la base de datos
+const DB_PATH = path.join(__dirname, 'trades.db');
+const db = new sqlite3.Database(DB_PATH);
+
+// Configuración del servidor
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
+// Crear tabla trades si no existe
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pair TEXT NOT NULL,
+      quantity REAL NOT NULL,
+      stopPercent REAL,
+      highestPrice REAL,
+      buyPrice REAL,
+      buyOrderId TEXT NOT NULL,
+      sellPrice REAL,
+      profitPercent REAL,
+      status TEXT DEFAULT 'active',
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+});
+
+// Función para validar el par
+function validateTradingPair(pair) {
+  if (typeof pair !== 'string') throw new Error('El par debe ser un string');
+  const cleanPair = pair.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const validCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'USDT'];
+  const endsWithValidCurrency = validCurrencies.some(currency => cleanPair.endsWith(currency));
+  if (!endsWithValidCurrency) throw new Error(`El par debe terminar con ${validCurrencies.join(', ')}`);
+  if (cleanPair.length < 5) throw new Error('El par debe tener al menos 5 caracteres');
+  return cleanPair;
+}
+
+function calculateQuantity(amount, price) {
+  const quantity = amount / price;
+  return Math.floor(quantity * 100000000) / 100000000;
+}
+
+// Endpoint para manejar alertas de TradingView
+app.post('/alerta', async (req, res) => {
+  try {
+    const { par, cantidad, trailingStopPercent } = req.body;
+    if (!par || !cantidad || !trailingStopPercent) return res.status(400).json({ error: 'Parámetros faltantes' });
+    const cleanPair = validateTradingPair(par);
+
+    const existingTrade = await new Promise((resolve, reject) => {
+      db.get("SELECT * FROM trades WHERE pair = ? AND status = 'active' LIMIT 1", [cleanPair], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      });
+    });
+
+    if (existingTrade) {
+      console.log(`⚠️ Trade activo ya existente para ${cleanPair}. Se omite la compra.`);
+      return res.status(200).json({ status: 'skip', message: `Trade ya activo para ${cleanPair}` });
+    }
+
+    const amount = parseFloat(cantidad);
+    const ticker = await axios.get(`https://api.kraken.com/0/public/Ticker?pair=${cleanPair}`);
+    const currentPrice = parseFloat(ticker.data.result[cleanPair].c[0]);
+    const quantity = calculateQuantity(amount, currentPrice);
+
+    const order = await kraken.api('AddOrder', {
+      pair: cleanPair,
+      type: 'buy',
+      ordertype: 'market',
+      volume: quantity.toString()
+    });
+
+    db.run(`INSERT INTO trades (pair, quantity, stopPercent, highestPrice, buyPrice, buyOrderId) VALUES (?, ?, ?, ?, ?, ?)`,
+      [cleanPair, quantity, trailingStopPercent, currentPrice, currentPrice, order.result.txid[0]]);
+
+    console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${currentPrice}`);
+    return res.status(200).json({
+      status: 'success',
+      orderId: order.result.txid[0],
+      pair: cleanPair,
+      quantity,
+      price: currentPrice
+    });
+
+  } catch (error) {
+    console.error(`❌ Error en /alerta: ${error.message}`);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Iniciar el servidor
+const server = app.listen(PORT, () => {
+  console.log(`Servidor corriendo en el puerto ${PORT}`);
+});
+
+// Manejo de cierre limpio
+process.on('SIGINT', () => {
+  db.close();
+  server.close(() => {
+    console.log('Servidor detenido');
+  });
+});
+
+
+
+
+
+Archivo tradingController.js
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const crypto = require('crypto');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Configuración de la base de datos SQLite
+const DB_PATH = path.join(__dirname, 'trades.db');
+let db = new sqlite3.Database(DB_PATH, (err) => {
+    if (err) {
+        console.error('Error al conectar con la base de datos:', err.message);
+    } else {
+        console.log('Conexión a la base de datos SQLite establecida.');
+    }
+});
+
+// Función para obtener la firma de Kraken
+function getKrakenSignature(urlpath, request, secret) {
+    const message = request.nonce + request.body;
+    const secret_buffer = Buffer.from(secret, 'base64');
+    const hash_digest = crypto.createHash('sha256').update(message).digest();
+    const hmac = crypto.createHmac('sha512', secret_buffer).update(urlpath + hash_digest).digest('base64');
+    return hmac;
+}
+
+// Configuración inicial del servidor y middleware
+app.use(express.json());
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    next();
+});
+
+// Endpoint para recibir alertas de TradingView y procesar trades
+app.post('/alerta', async (req, res) => {
+    const { par, cantidad, trailingStopPercent } = req.body;
+    // Aquí añadirías la lógica para validar parámetros, manejar la alerta y ejecutar el trade
+    console.log(`Alerta recibida para ${par} con cantidad ${cantidad} y un trailing stop de ${trailingStopPercent}%`);
+    res.status(200).json({ message: 'Alerta recibida y procesada' });
+});
+
+// Más endpoints y lógica según las necesidades de tu proyecto...
+
+// Iniciar el servidor
+app.listen(PORT, () => {
+    console.log(`Servidor corriendo en el puerto ${PORT}`);
+});
+
+Hay una carpeta que pone node_modules
+
+El codigo que activa las alarmas en Tradingview es:
+ //@version=5
+indicator("WT+Madrid Ribbon - Alertas Simplificadas", overlay=true)
+
+// 1. Define indicator parameters
+trailPercent = input.float(5.0, "Trailing Stop %")
+tradeAmount = input.float(500, "Trade Amount")
+
+// 2. Define the indicator functions FIRST
+waveTrendSignal() =>
+    length = 10
+    avgLength = 21
+    ap = hlc3
+    esa = ta.ema(ap, length)
+    d = ta.ema(math.abs(ap - esa), length)
+    ci = (ap - esa) / (0.015 * d)
+    tci = ta.ema(ci, avgLength)
+    tci - ta.sma(tci, 4)
+
+madridLime() =>
+    ma05 = ta.ema(close, 5)
+    ma100 = ta.ema(close, 100)
+    ta.change(ma05) >= 0 and ma05 > ma100
+
+// 3. Calculate the condition
+buyCondition = ta.crossover(waveTrendSignal(), 0) and madridLime()
+
+// 4. Create the alert condition with SIMPLE MESSAGE
+// Note: Message will need to be edited manually in the alert dialog
+alertcondition(buyCondition, title="Señal de Compra")
+
+// 5. Visual signal (optional)
+plotshape(buyCondition, title="Señal", location=location.belowbar, 
+         color=color.green, style=shape.labelup, 
+         text="COMPRA", textcolor=color.white)
+
+Y también este:
+//@version=6
+indicator(title="WaveTrend Shadow BUY Signal", overlay=true)
+
+// Parámetros
+n1 = input.int(10, "Channel Length")
+n2 = input.int(21, "Average Length")
+
+// Cálculo WaveTrend
+ap = hlc3
+esa = ta.ema(ap, n1)
+d = ta.ema(math.abs(ap - esa), n1)
+ci = (ap - esa) / (0.015 * d)
+tci = ta.ema(ci, n2)
+wt1 = tci
+wt2 = ta.sma(wt1, 4)
+diff = wt1 - wt2
+
+// Señal de compra: cuando la sombra cruza 0 de abajo hacia arriba
+buySignal = ta.crossover(diff, 0)
+
+// Mostrar solo la sombra
+plot(diff, title="Sombra Azul", color=color.new(color.blue, 80), style=plot.style_area)
+
+// Mostrar señal en el gráfico
+plotshape(buySignal, title="BUY", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+
+// Alerta para webhook 
+alertcondition(buySignal, title="Alerta de Compra", message="BUY")
+
+
+Consideraciones del asistente, obligaciones:
+
+1. Los conocimientos de programación son muy limitados de la persona a la que se dirige el asistente. El asistente debe mostrar los pasos 1 por 1, nunca mas de una secuencia de más de dos pasos.
+2. Nunca debe dar por supuesto la persona sabe que un comando debe ponerlo en Terminal o en un archivo de visual studio code, el asistente debe decirlo antes siempre; por ejemplo: “abre terminal y copia esto:” ,o, “En Visual Studo Code, abre el archivo server.js y copia este codigo:”.
+3. El asistente nunca debe mostrar las modificaciones de codigo aisladas, en otras palabras, el asistente siempre debe mostrar el codigo listo y entero para que la persona lo copie entero y lo pegue entero. O sea, nunca sugerencias como: “cambia esta parte del código de server.js por esta otra”. Siempre se debe poner todo el codigo desde la primera hasta la última linea del archivo, para que el individuo lo pueda pegar todo entero.
+4. Se dispone de Terminal, Visual Studio Code, Github, Railway, Tradingview.
+5. Envíame los pasos como texto continuo, no como lista numerada. Hazlo todo en texto plano, sin listas numeradas tipo markdown. Usa comentarios cuando sea necesario. No uses funciones avanzadas ni herramientas adicionales como File Search o Code Interpreter. Solo explícame cómo hacerlo directamente desde mi Mac en local. 
+6. Uso la carpeta `bot-kraken-openai` en mi escritorio.
+
+
