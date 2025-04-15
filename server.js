@@ -1,4 +1,4 @@
-// server.js - versión PostgreSQL
+// server.js - versión PostgreSQL completa y corregida con log inicial
 const express = require('express');
 const KrakenClient = require('kraken-api');
 const axios = require('axios');
@@ -6,6 +6,8 @@ const dotenv = require('dotenv');
 const { Pool } = require('pg');
 
 dotenv.config();
+console.log("📡 Iniciando server.js...");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -26,7 +28,7 @@ app.post('/alerta', async (req, res) => {
 
     // Verificar saldo actual del activo
     const balanceResult = await kraken.api('Balance');
-    const balanceEnPar = parseFloat(balanceResult[cleanPair]) || 0;
+    const balanceEnPar = parseFloat(balanceResult.result[cleanPair]) || 0;
 
     if (balanceEnPar > 8) {
       console.log(`⚠️ Ya tienes ${balanceEnPar} en ${cleanPair}, no se compra.`);
