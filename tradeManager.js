@@ -1,75 +1,62 @@
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+// tradeManager.js - versión PostgreSQL
+const { Pool } = require('pg');
 const kraken = require('./krakenApiSetup');
+require('dotenv').config();
 
-(async () => {
-  const db = await open({
-    filename: './trades.db',
-    driver: sqlite3.Database
-  });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-  async function updateTrades() {
-    const trades = await db.all("SELECT * FROM trades WHERE status = 'active'");
-    
-    for (const trade of trades) {
-      const currentPrice = await kraken.getCurrentPrice(trade.pair);
-      if (!currentPrice) continue;
+async function updateTrades() {
+  const { rows: trades } = await pool.query("SELECT * FROM trades WHERE status = 'active'");
 
-      const stopPrice = trade.highestPrice * (1 - trade.stopPercent / 100);
-      const limitTriggerPrice = trade.highestPrice * (1 - (trade.stopPercent * 0.75) / 100);
+  for (const trade of trades) {
+    const currentPrice = await kraken.getCurrentPrice(trade.pair);
+    if (!currentPrice) continue;
 
-      // Actualizar highestPrice si sube
-      if (currentPrice > trade.highestPrice) {
-        await db.run("UPDATE trades SET highestPrice = ?, sellPrice = NULL WHERE id = ?", [currentPrice, trade.id]);
+    const stopPrice = trade.highestprice * (1 - trade.stoppercent / 100);
+    const limitTrigger = trade.highestprice * (1 - (trade.stoppercent * 0.75) / 100);
+
+    if (currentPrice > trade.highestprice) {
+      await pool.query("UPDATE trades SET highestPrice = $1, sellPrice = NULL WHERE id = $2", [currentPrice, trade.id]);
+      continue;
+    }
+
+    if (trade.sellprice && trade.sellprice.length > 4) {
+      const executedPrice = await kraken.checkOrderExecuted(trade.sellprice);
+      if (executedPrice) {
+        const profit = ((executedPrice - trade.buyprice) / trade.buyprice) * 100;
+        await pool.query("UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2 WHERE id = $3", [executedPrice, profit, trade.id]);
+        console.log(`✅ Venta límite ejecutada para ${trade.pair}. Precio: ${executedPrice}`);
         continue;
       }
+    }
 
-      // Si hay una orden límite colocada, comprobar si se ha ejecutado
-      if (trade.sellPrice && trade.sellPrice.length > 4) {
-        const executedPrice = await kraken.checkOrderExecuted(trade.sellPrice);
-        if (executedPrice) {
-          const profit = ((executedPrice - trade.buyPrice) / trade.buyPrice) * 100;
-          await db.run("UPDATE trades SET status = 'completed', sellPrice = ?, profitPercent = ? WHERE id = ?", 
-                       [executedPrice, profit, trade.id]);
-          console.log(`✅ Venta límite ejecutada para ${trade.pair}. Precio: ${executedPrice}`);
-          continue;
-        }
+    if (trade.sellprice && currentPrice > limitTrigger) {
+      await kraken.cancelOrder(trade.sellprice);
+      await pool.query("UPDATE trades SET sellPrice = NULL WHERE id = $1", [trade.id]);
+      continue;
+    }
+
+    if (!trade.sellprice && currentPrice <= limitTrigger && currentPrice > stopPrice) {
+      const orderId = await kraken.sellLimit(trade.pair, trade.quantity, stopPrice);
+      if (orderId) {
+        await pool.query("UPDATE trades SET sellPrice = $1 WHERE id = $2", [orderId, trade.id]);
+        console.log(`📌 Venta límite colocada para ${trade.pair} a ${stopPrice}`);
       }
+      continue;
+    }
 
-      // Si el precio actual sube, cancelar la orden límite si existe
-      if (trade.sellPrice && currentPrice > limitTriggerPrice) {
-        await kraken.cancelOrder(trade.sellPrice);
-        await db.run("UPDATE trades SET sellPrice = NULL WHERE id = ?", [trade.id]);
-        continue;
-      }
-
-      // Colocar orden límite si el precio bajó lo suficiente
-      if (!trade.sellPrice && currentPrice <= limitTriggerPrice && currentPrice > stopPrice) {
-        const orderId = await kraken.sellLimit(trade.pair, trade.quantity, stopPrice);
-        if (orderId) {
-          await db.run("UPDATE trades SET sellPrice = ? WHERE id = ?", [orderId, trade.id]);
-          console.log(`📌 Venta límite colocada para ${trade.pair} a ${stopPrice}`);
-        } else {
-          console.warn(`⚠️ No se pudo colocar orden límite para ${trade.pair}`);
-        }
-        continue;
-      }
-
-      // Vender a mercado si se alcanzó el stop real
-      if (currentPrice <= stopPrice) {
-        const orderId = await kraken.sell(trade.pair, trade.quantity);
-        if (orderId) {
-          const priceFinal = await kraken.getCurrentPrice(trade.pair);
-          const profit = ((priceFinal - trade.buyPrice) / trade.buyPrice) * 100;
-          await db.run("UPDATE trades SET status = 'completed', sellPrice = ?, profitPercent = ? WHERE id = ?", 
-                       [priceFinal, profit, trade.id]);
-          console.log(`✅ Venta a mercado ejecutada para ${trade.pair}. Precio: ${priceFinal}`);
-        } else {
-          console.error(`❌ Venta a mercado fallida para ${trade.pair}, trade sigue activo`);
-        }
+    if (currentPrice <= stopPrice) {
+      const orderId = await kraken.sell(trade.pair, trade.quantity);
+      if (orderId) {
+        const finalPrice = await kraken.getCurrentPrice(trade.pair);
+        const profit = ((finalPrice - trade.buyprice) / trade.buyprice) * 100;
+        await pool.query("UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2 WHERE id = $3", [finalPrice, profit, trade.id]);
+        console.log(`✅ Venta a mercado ejecutada para ${trade.pair}. Precio: ${finalPrice}`);
+      } else {
+        console.error(`❌ Venta a mercado fallida para ${trade.pair}, trade sigue activo`);
       }
     }
   }
+}
 
-  setInterval(updateTrades, 60000);
-})();
+setInterval(updateTrades, 60000);
