@@ -1,87 +1,108 @@
-// server.js - versión PostgreSQL completa y corregida con log inicial
-const express = require('express');
-const KrakenClient = require('kraken-api');
-const axios = require('axios');
-const dotenv = require('dotenv');
-const { Pool } = require('pg');
-
-dotenv.config();
-console.log("📡 Iniciando server.js...");
+require("dotenv").config();
+const express = require("express");
+const bodyParser = require("body-parser");
+const { Pool } = require("pg");
+const kraken = require("./krakenClient");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(bodyParser.json());
 
-const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes("railway")
+    ? { rejectUnauthorized: false }
+    : false,
+});
 
-app.use(express.json());
+app.post("/alerta", async (req, res) => {
+  const { par, trailingStopPercent, inversion } = req.body;
 
-app.post('/alerta', async (req, res) => {
+  // Validación básica del webhook
+  if (!par || typeof par !== "string") {
+    return res.status(400).json({ error: "Campo 'par' requerido y debe ser texto" });
+  }
+
+  if (
+    typeof trailingStopPercent !== "number" ||
+    trailingStopPercent < 1 ||
+    trailingStopPercent > 50
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Campo 'trailingStopPercent' requerido y debe ser un número entre 1 y 50" });
+  }
+
+  if (
+    inversion !== undefined &&
+    (typeof inversion !== "number" || inversion < 5)
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Si se incluye 'inversion', debe ser un número mayor a 5" });
+  }
+
   try {
-    const { par, trailingStopPercent } = req.body;
-    if (!par || !trailingStopPercent) {
-      return res.status(400).json({ error: 'Faltan parámetros: par y trailingStopPercent son obligatorios' });
-    }
+    const cleanPair = par.replace(/[^a-zA-Z]/g, "").toUpperCase();
+    const balance = await kraken.api("Balance");
+    const baseAsset = cleanPair.slice(0, 3);
+    const baseAmount = parseFloat(balance.result?.[baseAsset] || 0);
 
-    const cleanPair = par.toUpperCase();
-    const stop = parseFloat(trailingStopPercent);
-
-    // Verificar saldo actual del activo
-    const balanceResult = await kraken.api('Balance');
-    const balanceEnPar = parseFloat(balanceResult.result[cleanPair]) || 0;
-
-    if (balanceEnPar > 8) {
-      console.log(`⚠️ Ya tienes ${balanceEnPar} en ${cleanPair}, no se compra.`);
-      return res.status(200).json({ message: `No se compra porque ya hay ${balanceEnPar} en Kraken para ${cleanPair}` });
+    if (baseAmount > 10) {
+      console.log(`⛔ Ya hay más de 10 unidades de ${baseAsset} en cartera. No se ejecuta compra.`);
+      return res.status(200).json({ message: "Par ya en cartera, no se compra." });
     }
 
     const { rows } = await pool.query(
-      `SELECT quantity, sellPrice FROM trades WHERE pair = $1 AND status = 'completed' ORDER BY id DESC LIMIT 1`,
+      "SELECT * FROM trades WHERE pair = $1 AND status = 'completed' ORDER BY createdAt DESC LIMIT 1",
       [cleanPair]
     );
 
-    let inversionEUR = 40;
-if (req.body.inversion) {
-  inversionEUR = parseFloat(req.body.inversion);
-  console.log(`💸 Inversión personalizada recibida: ${inversionEUR} EUR`);
-} else if (rows.length > 0) {
-  const lastTrade = rows[0];
-  if (lastTrade.sellprice && lastTrade.quantity) {
-    inversionEUR = lastTrade.sellprice * lastTrade.quantity;
-    console.log(`🔁 Reinvierte ${inversionEUR.toFixed(2)} EUR de la última venta.`);
-  }
-} else {
-  console.log(`🆕 Primera vez para ${cleanPair}, usa inversión por defecto de 40 EUR`);
-}
+    let inversionEUR;
 
-    const ticker = await axios.get(`https://api.kraken.com/0/public/Ticker?pair=${cleanPair}`);
-    const price = parseFloat(ticker.data.result[cleanPair].c[0]);
-    const quantity = Math.floor((inversionEUR / price) * 100000000) / 100000000;
+    // Si el webhook trae "inversion", se usa ese valor
+    if (inversion) {
+      inversionEUR = parseFloat(inversion);
+      console.log(`💸 Inversión personalizada recibida: ${inversionEUR} EUR`);
+    } else if (rows.length > 0) {
+      // Si hay trades anteriores, se reinvierte el beneficio anterior
+      const lastTrade = rows[0];
+      if (lastTrade.sellprice && lastTrade.quantity) {
+        inversionEUR = lastTrade.sellprice * lastTrade.quantity;
+        console.log(`🔁 Reinvierte ${inversionEUR.toFixed(2)} EUR de la última venta.`);
+      } else {
+        inversionEUR = 40;
+        console.log(`🆕 Primer trade registrado, usando inversión por defecto de 40 EUR`);
+      }
+    } else {
+      inversionEUR = 40;
+      console.log(`🆕 Primer trade registrado, usando inversión por defecto de 40 EUR`);
+    }
 
-    const order = await kraken.api('AddOrder', {
+    const ticker = await kraken.api("Ticker", { pair: cleanPair });
+    const marketPrice = parseFloat(ticker.result[cleanPair].c[0]);
+    const quantity = +(inversionEUR / marketPrice).toFixed(8);
+
+    const order = await kraken.api("AddOrder", {
       pair: cleanPair,
-      type: 'buy',
-      ordertype: 'market',
-      volume: quantity.toString()
+      type: "buy",
+      ordertype: "market",
+      volume: quantity.toString(),
     });
 
-    const orderId = order.result.txid[0];
-
     await pool.query(
-      `INSERT INTO trades (pair, quantity, stopPercent, highestPrice, buyPrice, sellPrice, status)
-       VALUES ($1, $2, $3, $4, $4, NULL, 'active')`,
-      [cleanPair, quantity, stop, price]
+      "INSERT INTO trades (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt) VALUES ($1, $2, $3, $4, $5, 'active', NOW())",
+      [cleanPair, quantity, marketPrice, marketPrice, trailingStopPercent]
     );
 
-    console.log(`✅ COMPRA ejecutada: ${quantity} ${cleanPair} a ${price}`);
-    res.json({ message: 'Compra ejecutada', pair: cleanPair, quantity, price });
-  } catch (error) {
-    console.error(`❌ Error en /alerta: ${error.message}`);
-    res.status(500).json({ error: error.message });
+    console.log(`✅ COMPRA ejecutada: ${quantity} ${cleanPair} a ${marketPrice}`);
+    res.status(200).json({ message: "Compra ejecutada correctamente" });
+  } catch (err) {
+    console.error("❌ Error en /alerta:", err);
+    res.status(500).json({ error: "Error al procesar la alerta" });
   }
 });
 
-app.get('/estado', async (req, res) => {
+app.get("/estado", async (req, res) => {
   try {
     const { rows: activos } = await pool.query(
       `SELECT pair, quantity, buyPrice, highestPrice, stopPercent, createdAt
@@ -107,6 +128,7 @@ app.get('/estado', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`🚀 Servidor corriendo en el puerto ${port}`);
 });
