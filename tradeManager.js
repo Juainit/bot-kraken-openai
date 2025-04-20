@@ -28,16 +28,15 @@ async function updateTrades() {
     for (const trade of res.rows) {
       const { pair, quantity, highestprice, stoppercent, buyprice, id } = trade;
 
-      const ticker = await kraken.api("Ticker", { pair });
-      const price = parseFloat(ticker.result[Object.keys(ticker.result)[0]].c[0]);
+      const price = await kraken.getTicker(pair);
+      if (!price) continue;
 
-      const stopPrice = highestprice * (1 - stoppercent / 100);          // 100 % del trailing
-      const preLimitTrigger = highestprice * (1 - 0.75 * stoppercent / 100); // 75 % del trailing
-      const emergencyTrigger = stopPrice * 0.8; // 20 % más bajo que el límite
+      const stopPrice = highestprice * (1 - stoppercent / 100);
+      const preLimitTrigger = highestprice * (1 - 0.75 * stoppercent / 100);
+      const emergencyTrigger = stopPrice * 0.8;
 
       preciosStop.set(pair, stopPrice);
 
-      // Comprobamos si la orden limitada fue ejecutada por completo
       if (ordenesLimitadas.has(pair)) {
         const orderId = ordenesLimitadas.get(pair);
         const estado = await kraken.checkOrderExecuted(orderId);
@@ -58,7 +57,6 @@ async function updateTrades() {
         }
       }
 
-      // Si el precio sube, se reinicia trailing
       if (price > highestprice) {
         await client.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [price, id]);
         if (ordenesLimitadas.has(pair)) {
@@ -69,7 +67,6 @@ async function updateTrades() {
         continue;
       }
 
-      // Si precio cae al 75 % del stop → colocar venta limitada al stopPrice
       if (!ordenesLimitadas.has(pair) && price <= preLimitTrigger) {
         const limitOrderId = await kraken.sellLimit(pair, quantity, stopPrice);
         if (limitOrderId) {
@@ -79,7 +76,6 @@ async function updateTrades() {
         continue;
       }
 
-      // Si precio cae al 80 % del stop y la orden limitada no se ejecutó → venta de emergencia
       if (ordenesLimitadas.has(pair) && price <= emergencyTrigger) {
         const sellOrder = await kraken.sell(pair, quantity);
         const sellPrice = price;
