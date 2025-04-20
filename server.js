@@ -41,15 +41,18 @@ app.post('/alerta', async (req, res) => {
     );
 
     let inversionEUR = 40;
-    if (rows.length > 0) {
-      const lastTrade = rows[0];
-      if (lastTrade.sellprice && lastTrade.quantity) {
-        inversionEUR = lastTrade.sellprice * lastTrade.quantity;
-        console.log(`🔁 Reinvierte ${inversionEUR.toFixed(2)} EUR de la última venta.`);
-      }
-    } else {
-      console.log(`🆕 Primera vez para ${cleanPair}, usa inversión por defecto de 40 EUR`);
-    }
+if (req.body.inversion) {
+  inversionEUR = parseFloat(req.body.inversion);
+  console.log(`💸 Inversión personalizada recibida: ${inversionEUR} EUR`);
+} else if (rows.length > 0) {
+  const lastTrade = rows[0];
+  if (lastTrade.sellprice && lastTrade.quantity) {
+    inversionEUR = lastTrade.sellprice * lastTrade.quantity;
+    console.log(`🔁 Reinvierte ${inversionEUR.toFixed(2)} EUR de la última venta.`);
+  }
+} else {
+  console.log(`🆕 Primera vez para ${cleanPair}, usa inversión por defecto de 40 EUR`);
+}
 
     const ticker = await axios.get(`https://api.kraken.com/0/public/Ticker?pair=${cleanPair}`);
     const price = parseFloat(ticker.data.result[cleanPair].c[0]);
