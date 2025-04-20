@@ -7,7 +7,7 @@
   "deploy": {
     "runtime": "V2",
     "numReplicas": 1,
-    "startCommand": "node tradeManager.js",
+    "startCommand": "./start.sh",
     "sleepApplication": false,
     "multiRegionConfig": {
       "europe-west4-drams3a": {
