@@ -1,85 +1,212 @@
-Descripción General del Proyecto
+= Manual del Bot de Trading Automatizado con Kraken y TradingView
+:sectnums:
+:toc:
 
-Objetivo
+== 1. Objetivo del Proyecto
 
-El objetivo de este sistema es automatizar operaciones de compra y venta en el exchange Kraken, a partir de señales generadas desde TradingView. El bot busca maximizar beneficios mediante una lógica avanzada de trailing stop y reinversión automática del capital en la siguiente operación. Adicionalmente, se incluyen mecanismos para la ejecución manual y supervisión del estado del sistema.
+Automatizar operaciones de compra y venta de criptomonedas en el exchange Kraken usando señales (webhooks) provenientes de TradingView. El bot aplica lógica de trailing stop, reinversión automática, venta manual, y manejo avanzado de errores.
 
-Componentes del Sistema
+== 2. Componentes Principales
 
-1. server.js – Módulo de compras
+=== 2.1 server.js
+Recibe alertas vía POST /alerta, valida datos, decide inversión y ejecuta la compra. Permite personalizar la cantidad a invertir o usar reinversión automática. Registra cada operación en PostgreSQL. También expone los endpoints:
 
-Este componente expone un endpoint HTTP (POST /alerta) que recibe señales desde TradingView. Al recibir una señal, ejecuta los siguientes pasos:
-	•	Extrae el par de trading (par) y el porcentaje de trailing stop (trailingStopPercent) del cuerpo del mensaje JSON.
-	•	Consulta el balance actual del par en la cuenta Kraken.
-	•	Si el balance supera los 8 a 10 EUR del par, se descarta la señal.
-	•	Determina el monto a invertir:
-	•	Si existe una operación anterior completada para ese par, se reinvierte el capital obtenido.
-	•	Si no existe historial, se utiliza una inversión por defecto de 40 EUR.
-	•	Si el mensaje incluye el campo "inversion", este valor sobrescribe los anteriores y se utiliza directamente como monto a invertir.
-	•	Calcula la cantidad de activos a comprar a partir del precio actual del mercado.
-	•	Ejecuta una orden de compra a mercado.
-	•	Registra la operación en la base de datos PostgreSQL con estado active.
+GET /estado: estado actual de activos y última venta
 
-⸻
+GET /historial: lista completa de operaciones
 
-2. tradeManager.js – Módulo de ventas
+GET /historial/:par: operaciones históricas filtradas por par
 
-Este módulo ejecuta un proceso en segundo plano que revisa, en intervalos de un minuto, todas las operaciones activas registradas en la base de datos. Para cada una de ellas aplica una lógica avanzada de trailing stop que permite capturar beneficios de subidas y proteger frente a caídas rápidas.
+=== 2.2 tradeManager.js
+Proceso que monitorea continuamente los trades activos. Aplica trailing stop y ejecuta ventas automáticas:
 
-La lógica es la siguiente:
-	1.	Actualización del precio máximo (highestPrice):
-Si el precio actual supera el valor más alto registrado desde la compra, el sistema actualiza highestPrice con ese nuevo valor. Además, si existía una orden de venta limitada previamente colocada, esta se cancela, ya que la subida reinicia la lógica de trailing.
-	2.	Activación de orden de venta limitada anticipada:
-Si el precio cae al 75 % del recorrido definido por el stopPercent, el sistema considera una potencial reversión y coloca una orden de venta limitada.
-La orden no se coloca al precio actual, sino al precio correspondiente al 100 % del stop definido.
-Por ejemplo, si se ha configurado un trailing del 10 % y el activo alcanza un highestPrice de 1.00 EUR, el bot:
-	•	Detectará una caída al 0.925 (7.5 %) y colocará una venta limitada
-	•	Pero dicha orden será al nivel de 0.90 EUR, correspondiente al 10 % de caída.
-	3.	Cancelación por recuperación de precio:
-Si tras colocar la orden limitada el precio se recupera y vuelve a superar highestPrice, la orden limitada es cancelada, y el nuevo highestPrice se actualiza para reiniciar el proceso de trailing.
-	4.	Venta de emergencia a mercado:
-Si el precio sigue cayendo y llega al 80 % del stopPrice original, sin que se haya ejecutado la orden limitada, el sistema ejecuta una venta a mercado forzada.
-Continuando con el ejemplo anterior, si el stopPrice estaba en 0.90 EUR (10 % de caída), el bot venderá automáticamente si el precio baja a 0.72 EUR (un 20 % adicional respecto al nivel de protección del trailing stop).
+Coloca orden LIMIT si cae 75 % del margen
 
-⸻
+Ejecuta venta a mercado si cae 20 % adicional
 
-3. venderManual.js – Módulo de venta manual
+Cancela orden LIMIT si el precio se recupera
 
-Permite forzar manualmente la venta de una posición activa para un par determinado. Esta funcionalidad es útil en escenarios donde se desea intervenir o realizar cierres de emergencia sin esperar a que se cumpla la lógica de trailing automática.
+Detecta ejecuciones completas y registra el fee
 
-Este script:
-	•	Consulta la base de datos por la última operación activa del par especificado.
-	•	Ejecuta una orden de venta a mercado.
-	•	Calcula el porcentaje de ganancia o pérdida.
-	•	Actualiza el estado de la operación a completed.
+=== 2.3 venderManual.js
+Permite forzar manualmente la venta de una operación activa específica, ejecutando una orden a mercado del 100% de la cantidad.
 
-⸻
+== 3. Lógica de Inversión
 
-Estructura de la Base de Datos
+Si el webhook incluye "inversion": se usa ese valor exacto.
 
-La base de datos utiliza PostgreSQL y contiene una única tabla principal denominada trades, con los siguientes campos:
-	•	id: identificador único.
-	•	pair: par de activos operado.
-	•	quantity: cantidad comprada.
-	•	buyPrice: precio al que se ejecutó la compra.
-	•	highestPrice: precio más alto alcanzado desde la compra.
-	•	stopPercent: porcentaje configurado de trailing stop.
-	•	sellPrice: precio de venta (si aplica).
-	•	profitPercent: porcentaje de beneficio o pérdida (si aplica).
-	•	feeEUR: comisión cobrada por Kraken en la venta (si aplica).
-	•	status: estado de la operación (active o completed).
-	•	createdAt: fecha y hora de la operación.
+Si no, y hay operaciones anteriores: se reinvierte el capital obtenido.
 
-⸻
+Si es la primera vez: se invierten 40 EUR por defecto.
 
-Endpoint de Estado: /estado
+Cambiar solo el trailing no afecta la lógica de inversión.
 
-El servidor expone un endpoint de consulta de estado general a través de la ruta GET /estado. Este endpoint permite monitorear el comportamiento del sistema en tiempo real y devuelve los siguientes datos en formato JSON:
-	•	Lista de operaciones activas, incluyendo par, cantidad, precio de compra, highestPrice, stopPercent y fecha de creación.
-	•	La última operación completada, con datos de precio de venta, ganancia o pérdida porcentual y comisión aplicada.
+== 4. Formato de Webhook desde TradingView
 
+=== Reinvierte automáticamente (por defecto 40€ si es la primera vez)
+[source,json]
+{
+"par": "ADAEUR",
+"trailingStopPercent": 6
+}
 
+=== Compra con inversión personalizada
+[source,json]
+{
+"par": "ETHEUR",
+"trailingStopPercent": 7,
+"inversion": 50
+}
 
+== 5. API del Bot
+
+=== POST /alerta
+Procesa una nueva orden de compra. Valida campos y ejecuta si las condiciones se cumplen.
+
+=== GET /estado
+Devuelve el estado actual de:
+
+Todas las operaciones activas
+
+Última operación completada (precio, ganancia, fee)
+
+=== GET /historial
+Devuelve la lista completa de transacciones (activas y completadas)
+
+=== GET /historial/:par
+Devuelve el historial de transacciones filtrado por par (ej. ADAEUR)
+
+== 6. Comandos Curl para pruebas
+
+=== Enviar orden desde terminal
+[source,bash]
+curl -X POST https://bot-kraken-openai-production.up.railway.app/alerta -H "Content-Type: application/json" -d '{"par": "ADAEUR", "trailingStopPercent": 6}'
+
+=== Inversión personalizada
+[source,bash]
+curl -X POST https://bot-kraken-openai-production.up.railway.app/alerta -H "Content-Type: application/json" -d '{"par": "ETHEUR", "trailingStopPercent": 7, "inversion": 50}'
+
+=== Consultar estado
+[source,bash]
+curl https://bot-kraken-openai-production.up.railway.app/estado
+
+=== Consultar historial completo
+[source,bash]
+curl https://bot-kraken-openai-production.up.railway.app/historial
+
+=== Consultar historial por par
+[source,bash]
+curl https://bot-kraken-openai-production.up.railway.app/historial/ADAEUR
+
+== 7. Archivos Clave
+
+server.js → compra, validación, API REST y endpoints auxiliares
+
+tradeManager.js → trailing stop, ventas automáticas, fees
+
+venderManual.js → salida manual
+
+krakenClient.js → interfaz segura con API de Kraken
+
+package.json → dependencias
+
+railway.json → configuración para Railway
+
+.env → claves privadas de Kraken y URL de PostgreSQL
+
+== 8. GitHub y Railway
+
+=== GitHub
+Repositorio donde se alojan los archivos y desde donde Railway hace los despliegues.
+
+=== Railway
+Servicio donde está desplegado el contenedor Docker. Conectado a GitHub.
+
+PostgreSQL gestionado desde Railway
+
+Variables de entorno configuradas desde el panel
+
+== 9. Validación del Webhook
+
+Validaciones implementadas en server.js:
+
+"par": debe estar presente y ser string
+
+"trailingStopPercent": número entre 1 y 50
+
+"inversion": opcional, si existe debe ser > 5
+
+== 10. Gestión de Errores
+
+krakenClient.js detecta errores como:
+
+Par inválido
+
+Fondos insuficientes
+
+Problemas de conexión
+
+Todos los errores se capturan en consola con mensajes descriptivos. El sistema evita romper el flujo general.
+
+== 11. Diagrama de Trailing Stop
+
+Lógica visual del sistema (ver en PlantUML):
+
+Si el precio sube: se actualiza y cancela orden limitada
+
+Si cae 75 % del stop: se coloca orden limitada
+
+Si sube otra vez: se cancela
+
+Si cae 20 % más: se vende a mercado
+
+== 12. Scripts .command disponibles (uso desde Mac con doble clic)
+
+=== vender.command
+
+Pide el par
+
+Lanza venderManual.js
+
+Vende el 100% del activo en Kraken
+
+=== estado.command
+
+Muestra las operaciones activas y la última completada
+
+=== historial.command
+
+Muestra todas las transacciones (activas y completadas)
+
+Incluye beneficio, fee y moneda por transacción
+
+=== historial_moneda.command
+
+Pide una moneda y muestra sus últimas transacciones
+
+=== activos.command
+
+Lista todos los trades activos en la base de datos
+
+=== comprar.command
+
+Pide par, inversión y trailing
+
+Lanza una compra simulando una alerta (vía curl)
+
+=== manual.command
+
+Muestra menú: ver estado, vender, comprar o historial
+
+== 13. Próximas mejoras sugeridas
+
+Registro de errores en base de datos
+
+Alerta por email/Telegram
+
+Interfaz web de monitoreo
+
+Conversión automática de fee a EUR si está en USD/USDT
 
 
 

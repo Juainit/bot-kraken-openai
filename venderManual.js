@@ -1,48 +1,59 @@
-// venderManual.js - versión PostgreSQL
-require('dotenv').config();
-const { Pool } = require('pg');
-const kraken = require('./krakenApiSetup');
+require("dotenv").config();
+const { Client } = require("pg");
+const kraken = require("./krakenClient");
 
-const pool = new Pool({
+const pair = process.argv[2] || "ADAEUR";
+
+const client = new Client({
   connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes("railway")
+    ? { rejectUnauthorized: false }
+    : false,
 });
 
-async function venderManual(par) {
+client.connect().then(() => {
+  console.log("📡 Conectado a la base de datos");
+  vender(pair);
+});
+
+async function vender(pair) {
   try {
-    const { rows } = await pool.query(
-      `SELECT * FROM trades WHERE pair = $1 AND status = 'active' ORDER BY id DESC LIMIT 1`,
-      [par]
+    const res = await client.query(
+      "SELECT * FROM trades WHERE pair = $1 AND status = 'active' ORDER BY createdAt DESC LIMIT 1",
+      [pair]
     );
 
-    if (rows.length === 0) {
-      console.log(`❌ No hay trade activo para ${par}`);
+    if (res.rows.length === 0) {
+      console.log(`ℹ️ No hay ninguna operación activa para ${pair}. No se vendió nada.`);
       return;
     }
 
-    const trade = rows[0];
-    const result = await kraken.sell(par, trade.quantity);
+    const trade = res.rows[0];
+    const { quantity, buyprice, id } = trade;
 
-    if (!result) {
-      console.error(`❌ Error al ejecutar la venta para ${par}`);
-      return;
+    console.log(`💣 Vendiendo el 100% de ${pair}: ${quantity} unidades`);
+
+    const orden = await kraken.sell(pair, quantity);
+    const sellPrice = await kraken.getCurrentPrice(pair);
+
+    let fee = 0;
+    if (orden?.result?.txid?.[0]) {
+      const ordenInfo = await kraken.checkOrderExecuted(orden.result.txid[0]);
+      if (ordenInfo?.fee) fee = ordenInfo.fee;
     }
 
-    const precioActual = await kraken.getCurrentPrice(par);
-    const profit = ((precioActual - trade.buyprice) / trade.buyprice) * 100;
+    const profit = ((sellPrice - buyprice) / buyprice) * 100;
 
-    await pool.query(
-      `UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2 WHERE id = $3`,
-      [precioActual, profit, trade.id]
+    await client.query(
+      "UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2, feeEUR = $3 WHERE id = $4",
+      [sellPrice.toFixed(5), profit.toFixed(2), fee.toFixed(5), id]
     );
 
-    console.log(`💰 Venta a mercado ejecutada: ${trade.quantity} ${par}`);
-    console.log(`📈 Precio actual de ${par}: ${precioActual}`);
-    console.log(`✅ Trade manual vendido: ${par}, Cantidad: ${trade.quantity}, Precio: ${precioActual}, Beneficio: ${profit.toFixed(2)}%`);
-  } catch (error) {
-    console.error(`❌ Error en venta manual: ${error.message}`);
-  } finally {
-    await pool.end();
+    console.log(`✅ Venta completada de ${pair}`);
+    console.log(`💰 Precio de venta: ${sellPrice.toFixed(5)} EUR`);
+    console.log(`📈 Beneficio: ${profit.toFixed(2)}%`);
+    console.log(`💸 Fee aplicado: ${fee.toFixed(5)} ${pair.slice(-3)}`);
+  } catch (err) {
+    console.error("❌ Error al ejecutar venta:", err);
   }
 }
-
-venderManual('ADAEUR'); // Puedes cambiar el par aquí si quieres probar otro

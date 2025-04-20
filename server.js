@@ -17,7 +17,6 @@ const pool = new Pool({
 app.post("/alerta", async (req, res) => {
   const { par, trailingStopPercent, inversion } = req.body;
 
-  // Validación básica del webhook
   if (!par || typeof par !== "string") {
     return res.status(400).json({ error: "Campo 'par' requerido y debe ser texto" });
   }
@@ -27,18 +26,14 @@ app.post("/alerta", async (req, res) => {
     trailingStopPercent < 1 ||
     trailingStopPercent > 50
   ) {
-    return res
-      .status(400)
-      .json({ error: "Campo 'trailingStopPercent' requerido y debe ser un número entre 1 y 50" });
+    return res.status(400).json({ error: "Campo 'trailingStopPercent' requerido y debe ser un número entre 1 y 50" });
   }
 
   if (
     inversion !== undefined &&
     (typeof inversion !== "number" || inversion < 5)
   ) {
-    return res
-      .status(400)
-      .json({ error: "Si se incluye 'inversion', debe ser un número mayor a 5" });
+    return res.status(400).json({ error: "Si se incluye 'inversion', debe ser un número mayor a 5" });
   }
 
   try {
@@ -59,12 +54,10 @@ app.post("/alerta", async (req, res) => {
 
     let inversionEUR;
 
-    // Si el webhook trae "inversion", se usa ese valor
     if (inversion) {
       inversionEUR = parseFloat(inversion);
       console.log(`💸 Inversión personalizada recibida: ${inversionEUR} EUR`);
     } else if (rows.length > 0) {
-      // Si hay trades anteriores, se reinvierte el beneficio anterior
       const lastTrade = rows[0];
       if (lastTrade.sellprice && lastTrade.quantity) {
         inversionEUR = lastTrade.sellprice * lastTrade.quantity;
@@ -128,7 +121,38 @@ app.get("/estado", async (req, res) => {
   }
 });
 
+app.get("/historial", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM trades ORDER BY createdAt DESC");
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Error al obtener historial:", err);
+    res.status(500).json({ error: "Error al obtener el historial completo" });
+  }
+});
+
+app.get("/historial/:par", async (req, res) => {
+  const par = req.params.par;
+
+  try {
+    const result = await pool.query(
+      "SELECT * FROM trades WHERE pair = $1 ORDER BY createdAt DESC",
+      [par]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ mensaje: `No hay historial para ${par}` });
+    }
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error(`❌ Error al obtener historial de ${par}:", err);
+    res.status(500).json({ error: "Error al obtener el historial de esta moneda" });
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${port}`);
 });
+
