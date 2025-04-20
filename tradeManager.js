@@ -37,6 +37,7 @@ async function updateTrades() {
 
       preciosStop.set(pair, stopPrice);
 
+      // Validar si orden LIMIT anterior ya fue ejecutada
       if (ordenesLimitadas.has(pair)) {
         const orderId = ordenesLimitadas.get(pair);
         const estado = await kraken.checkOrderExecuted(orderId);
@@ -57,6 +58,7 @@ async function updateTrades() {
         }
       }
 
+      // Si el precio sube → cancelar orden LIMIT y actualizar trailing
       if (price > highestprice) {
         await client.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [price, id]);
         if (ordenesLimitadas.has(pair)) {
@@ -67,28 +69,38 @@ async function updateTrades() {
         continue;
       }
 
+      // Colocar orden limitada si no existe y cae 75 % del trailing
       if (!ordenesLimitadas.has(pair) && price <= preLimitTrigger) {
         const limitOrderId = await kraken.sellLimit(pair, quantity, stopPrice);
         if (limitOrderId) {
           ordenesLimitadas.set(pair, limitOrderId);
           console.log(`🧷 Venta LIMIT colocada para ${pair} a ${stopPrice.toFixed(5)}`);
+        } else {
+          console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
         }
         continue;
       }
 
+      // Venta de emergencia si cae por debajo del 80 % del trailing
       if (ordenesLimitadas.has(pair) && price <= emergencyTrigger) {
+        console.log(`⚠️ Activando venta de emergencia para ${pair}`);
         const sellOrder = await kraken.sell(pair, quantity);
-        const sellPrice = price;
 
-        let fee = 0;
-        if (sellOrder?.result?.txid?.[0]) {
-          const orderId = sellOrder.result.txid[0];
-          const executed = await kraken.checkOrderExecuted(orderId);
-          if (executed && executed.fee) {
-            fee = parseFloat(executed.fee);
-          }
+        if (!sellOrder || !sellOrder.result?.txid?.[0]) {
+          console.error(`❌ Venta de emergencia fallida para ${pair}: Kraken no devolvió txid.`);
+          continue;
         }
 
+        const orderId = sellOrder.result.txid[0];
+        const executed = await kraken.checkOrderExecuted(orderId);
+
+        if (!executed) {
+          console.error(`❌ Kraken no confirma ejecución de venta de emergencia para ${pair}`);
+          continue;
+        }
+
+        const sellPrice = executed.price;
+        const fee = executed.fee || 0;
         const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
 
         await client.query(
@@ -98,7 +110,7 @@ async function updateTrades() {
 
         ordenesLimitadas.delete(pair);
         preciosStop.delete(pair);
-        console.log(`💥 Venta de emergencia: ${pair} @ ${sellPrice} EUR, fee: ${fee}`);
+        console.log(`💥 Venta de emergencia ejecutada: ${pair} a ${sellPrice}, fee: ${fee}`);
       }
     }
   } catch (err) {

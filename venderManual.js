@@ -34,14 +34,21 @@ async function vender(pair) {
     console.log(`💣 Vendiendo el 100% de ${pair}: ${quantity} unidades`);
 
     const orden = await kraken.sell(pair, quantity);
-    const sellPrice = await kraken.getCurrentPrice(pair);
 
-    let fee = 0;
-    if (orden?.result?.txid?.[0]) {
-      const ordenInfo = await kraken.checkOrderExecuted(orden.result.txid[0]);
-      if (ordenInfo?.fee) fee = ordenInfo.fee;
+    if (!orden?.result?.txid?.[0]) {
+      console.error(`❌ Kraken no devolvió txid para la orden de venta de ${pair}`);
+      return;
     }
 
+    const ordenInfo = await kraken.checkOrderExecuted(orden.result.txid[0]);
+
+    if (!ordenInfo || ordenInfo.status !== "closed") {
+      console.error(`❌ La orden de venta no fue confirmada como ejecutada para ${pair}`);
+      return;
+    }
+
+    const sellPrice = ordenInfo.price;
+    const fee = ordenInfo.fee || 0;
     const profit = ((sellPrice - buyprice) / buyprice) * 100;
 
     await client.query(
@@ -54,6 +61,6 @@ async function vender(pair) {
     console.log(`📈 Beneficio: ${profit.toFixed(2)}%`);
     console.log(`💸 Fee aplicado: ${fee.toFixed(5)} ${pair.slice(-3)}`);
   } catch (err) {
-    console.error("❌ Error al ejecutar venta:", err);
+    console.error("❌ Error al ejecutar venta manual:", err);
   }
 }

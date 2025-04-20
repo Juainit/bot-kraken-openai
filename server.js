@@ -149,63 +149,68 @@ app.get("/historial/:par", async (req, res) => {
 });
 
 app.post("/vender", async (req, res) => {
-  const { par, tipo, porcentaje, precio } = req.body;
+  const { pair, tipo, cantidad, precio } = req.body;
+  const cleanPair = pair?.replace(/[^A-Z]/gi, "").toUpperCase();
 
-  if (!par || !tipo || !porcentaje) {
-    return res.status(400).json({ error: "Faltan campos obligatorios: par, tipo, porcentaje" });
+  if (!cleanPair || !tipo || !["mercado", "limite"].includes(tipo)) {
+    return res.status(400).json({
+      error: "Faltan campos obligatorios o tipo inválido ('mercado' o 'limite')",
+    });
   }
 
-  const cleanPair = par.replace(/[^a-zA-Z]/g, "").toUpperCase();
-  const quantityPercent = parseFloat(porcentaje);
+  if (tipo === "limite" && (typeof precio !== "number" || precio <= 0)) {
+    return res.status(400).json({
+      error: "Debe especificar 'precio' válido para orden límite",
+    });
+  }
 
   try {
     const balance = await kraken.getBalance();
     const baseAsset = cleanPair.slice(0, 3);
-    const amountHeld = parseFloat(balance?.[baseAsset] || 0);
+    const totalDisponible = parseFloat(balance?.[baseAsset] || 0);
+    const montoAVender = cantidad ? parseFloat(cantidad) : totalDisponible;
 
-    if (amountHeld === 0) {
-      return res.status(400).json({ error: `No hay ${baseAsset} en cartera para vender.` });
+    if (montoAVender > totalDisponible || montoAVender <= 0) {
+      return res.status(400).json({ error: "Cantidad inválida o saldo insuficiente" });
     }
 
-    const amountToSell = +(amountHeld * (quantityPercent / 100)).toFixed(8);
-
-    let orderResult;
-    let sellPrice = null;
-    let feeEUR = 0;
-
+    let result;
     if (tipo === "mercado") {
-      orderResult = await kraken.sell(cleanPair, amountToSell);
-      if (orderResult?.result?.txid?.[0]) {
-        const orderId = orderResult.result.txid[0];
-        const executed = await kraken.checkOrderExecuted(orderId);
-        if (executed) {
-          sellPrice = executed.price;
-          feeEUR = executed.fee;
-        }
-      }
-    } else if (tipo === "límite") {
-      if (!precio) {
-        return res.status(400).json({ error: "Debes especificar el precio para la venta límite." });
-      }
-      const limitOrderId = await kraken.sellLimit(cleanPair, amountToSell, parseFloat(precio));
-      return res.json({ mensaje: `🧷 Venta límite colocada para ${cleanPair}`, txid: limitOrderId });
+      result = await kraken.sell(cleanPair, montoAVender);
     } else {
-      return res.status(400).json({ error: "Tipo de venta no válido (usa 'mercado' o 'límite')" });
+      result = await kraken.sellLimit(cleanPair, montoAVender, precio);
     }
 
-    if (sellPrice !== null) {
+    if (!result || !result.result?.txid?.[0]) {
+      return res.status(500).json({ error: "No se pudo ejecutar la orden" });
+    }
+
+    const orderId = result.result.txid[0];
+    const execution = await kraken.checkOrderExecuted(orderId);
+    const sellPrice = execution?.price || precio;
+    const feeEUR = execution?.fee || 0;
+
+    // Intentar encontrar el último trade activo para actualizar
+    const { rows } = await pool.query(
+      "SELECT * FROM trades WHERE pair = $1 AND status = 'active' ORDER BY createdAt DESC LIMIT 1",
+      [cleanPair]
+    );
+
+    if (rows.length > 0) {
+      const last = rows[0];
+      const profit = ((sellPrice - last.buyprice) / last.buyprice) * 100;
+
       await pool.query(
-        `INSERT INTO trades (pair, quantity, sellPrice, feeEUR, status, createdAt)
-         VALUES ($1, $2, $3, $4, 'completed', NOW())`,
-        [cleanPair, amountToSell, sellPrice.toFixed(5), feeEUR.toFixed(5)]
+        "UPDATE trades SET sellPrice = $1, profitPercent = $2, feeEUR = $3, status = 'completed' WHERE id = $4",
+        [sellPrice.toFixed(5), profit.toFixed(2), feeEUR.toFixed(5), last.id]
       );
 
-      console.log(`💰 Venta a mercado de ${amountToSell} ${cleanPair} a ${sellPrice}`);
-      return res.json({ mensaje: `Venta completada: ${cleanPair} @ ${sellPrice}` });
+      console.log(`✅ Venta registrada para ${cleanPair}: ${montoAVender} a ${sellPrice}, fee: ${feeEUR}`);
     } else {
-      return res.status(500).json({ error: "No se pudo confirmar ejecución de la orden." });
+      console.log(`⚠️ Venta ejecutada sin entrada activa en DB para ${cleanPair}`);
     }
 
+    res.status(200).json({ message: "Venta ejecutada correctamente", txid: orderId });
   } catch (err) {
     console.error("❌ Error en /vender:", err);
     res.status(500).json({ error: "Error al procesar la venta" });
