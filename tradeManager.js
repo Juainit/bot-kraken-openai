@@ -37,6 +37,27 @@ async function updateTrades() {
 
       preciosStop.set(pair, stopPrice);
 
+      // Comprobamos si la orden limitada fue ejecutada por completo
+      if (ordenesLimitadas.has(pair)) {
+        const orderId = ordenesLimitadas.get(pair);
+        const estado = await kraken.checkOrderExecuted(orderId);
+        if (estado && estado.status === "closed") {
+          const sellPrice = parseFloat(estado.price);
+          const fee = parseFloat(estado.fee || 0);
+          const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
+
+          await client.query(
+            "UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2, feeEUR = $3 WHERE id = $4",
+            [sellPrice.toFixed(5), profitPercent.toFixed(2), fee.toFixed(5), id]
+          );
+
+          ordenesLimitadas.delete(pair);
+          preciosStop.delete(pair);
+          console.log(`✅ Orden LIMIT ejecutada: ${pair} @ ${sellPrice}, fee: ${fee}`);
+          continue;
+        }
+      }
+
       // Si el precio sube, se reinicia trailing
       if (price > highestprice) {
         await client.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [price, id]);
@@ -63,12 +84,12 @@ async function updateTrades() {
         const sellOrder = await kraken.sell(pair, quantity);
         const sellPrice = price;
 
-        let feeEUR = 0;
+        let fee = 0;
         if (sellOrder?.result?.txid?.[0]) {
           const orderId = sellOrder.result.txid[0];
           const executed = await kraken.checkOrderExecuted(orderId);
           if (executed && executed.fee) {
-            feeEUR = parseFloat(executed.fee);
+            fee = parseFloat(executed.fee);
           }
         }
 
@@ -76,12 +97,12 @@ async function updateTrades() {
 
         await client.query(
           "UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2, feeEUR = $3 WHERE id = $4",
-          [sellPrice.toFixed(5), profitPercent.toFixed(2), feeEUR.toFixed(5), id]
+          [sellPrice.toFixed(5), profitPercent.toFixed(2), fee.toFixed(5), id]
         );
 
         ordenesLimitadas.delete(pair);
         preciosStop.delete(pair);
-        console.log(`💥 Venta de emergencia: ${pair} @ ${sellPrice} EUR, fee: ${feeEUR}`);
+        console.log(`💥 Venta de emergencia: ${pair} @ ${sellPrice} EUR, fee: ${fee}`);
       }
     }
   } catch (err) {

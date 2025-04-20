@@ -1,3 +1,90 @@
+Descripción General del Proyecto
+
+Objetivo
+
+El objetivo de este sistema es automatizar operaciones de compra y venta en el exchange Kraken, a partir de señales generadas desde TradingView. El bot busca maximizar beneficios mediante una lógica avanzada de trailing stop y reinversión automática del capital en la siguiente operación. Adicionalmente, se incluyen mecanismos para la ejecución manual y supervisión del estado del sistema.
+
+Componentes del Sistema
+
+1. server.js – Módulo de compras
+
+Este componente expone un endpoint HTTP (POST /alerta) que recibe señales desde TradingView. Al recibir una señal, ejecuta los siguientes pasos:
+	•	Extrae el par de trading (par) y el porcentaje de trailing stop (trailingStopPercent) del cuerpo del mensaje JSON.
+	•	Consulta el balance actual del par en la cuenta Kraken.
+	•	Si el balance supera los 8 a 10 EUR del par, se descarta la señal.
+	•	Determina el monto a invertir:
+	•	Si existe una operación anterior completada para ese par, se reinvierte el capital obtenido.
+	•	Si no existe historial, se utiliza una inversión por defecto de 40 EUR.
+	•	Si el mensaje incluye el campo "inversion", este valor sobrescribe los anteriores y se utiliza directamente como monto a invertir.
+	•	Calcula la cantidad de activos a comprar a partir del precio actual del mercado.
+	•	Ejecuta una orden de compra a mercado.
+	•	Registra la operación en la base de datos PostgreSQL con estado active.
+
+⸻
+
+2. tradeManager.js – Módulo de ventas
+
+Este módulo ejecuta un proceso en segundo plano que revisa, en intervalos de un minuto, todas las operaciones activas registradas en la base de datos. Para cada una de ellas aplica una lógica avanzada de trailing stop que permite capturar beneficios de subidas y proteger frente a caídas rápidas.
+
+La lógica es la siguiente:
+	1.	Actualización del precio máximo (highestPrice):
+Si el precio actual supera el valor más alto registrado desde la compra, el sistema actualiza highestPrice con ese nuevo valor. Además, si existía una orden de venta limitada previamente colocada, esta se cancela, ya que la subida reinicia la lógica de trailing.
+	2.	Activación de orden de venta limitada anticipada:
+Si el precio cae al 75 % del recorrido definido por el stopPercent, el sistema considera una potencial reversión y coloca una orden de venta limitada.
+La orden no se coloca al precio actual, sino al precio correspondiente al 100 % del stop definido.
+Por ejemplo, si se ha configurado un trailing del 10 % y el activo alcanza un highestPrice de 1.00 EUR, el bot:
+	•	Detectará una caída al 0.925 (7.5 %) y colocará una venta limitada
+	•	Pero dicha orden será al nivel de 0.90 EUR, correspondiente al 10 % de caída.
+	3.	Cancelación por recuperación de precio:
+Si tras colocar la orden limitada el precio se recupera y vuelve a superar highestPrice, la orden limitada es cancelada, y el nuevo highestPrice se actualiza para reiniciar el proceso de trailing.
+	4.	Venta de emergencia a mercado:
+Si el precio sigue cayendo y llega al 80 % del stopPrice original, sin que se haya ejecutado la orden limitada, el sistema ejecuta una venta a mercado forzada.
+Continuando con el ejemplo anterior, si el stopPrice estaba en 0.90 EUR (10 % de caída), el bot venderá automáticamente si el precio baja a 0.72 EUR (un 20 % adicional respecto al nivel de protección del trailing stop).
+
+⸻
+
+3. venderManual.js – Módulo de venta manual
+
+Permite forzar manualmente la venta de una posición activa para un par determinado. Esta funcionalidad es útil en escenarios donde se desea intervenir o realizar cierres de emergencia sin esperar a que se cumpla la lógica de trailing automática.
+
+Este script:
+	•	Consulta la base de datos por la última operación activa del par especificado.
+	•	Ejecuta una orden de venta a mercado.
+	•	Calcula el porcentaje de ganancia o pérdida.
+	•	Actualiza el estado de la operación a completed.
+
+⸻
+
+Estructura de la Base de Datos
+
+La base de datos utiliza PostgreSQL y contiene una única tabla principal denominada trades, con los siguientes campos:
+	•	id: identificador único.
+	•	pair: par de activos operado.
+	•	quantity: cantidad comprada.
+	•	buyPrice: precio al que se ejecutó la compra.
+	•	highestPrice: precio más alto alcanzado desde la compra.
+	•	stopPercent: porcentaje configurado de trailing stop.
+	•	sellPrice: precio de venta (si aplica).
+	•	profitPercent: porcentaje de beneficio o pérdida (si aplica).
+	•	feeEUR: comisión cobrada por Kraken en la venta (si aplica).
+	•	status: estado de la operación (active o completed).
+	•	createdAt: fecha y hora de la operación.
+
+⸻
+
+Endpoint de Estado: /estado
+
+El servidor expone un endpoint de consulta de estado general a través de la ruta GET /estado. Este endpoint permite monitorear el comportamiento del sistema en tiempo real y devuelve los siguientes datos en formato JSON:
+	•	Lista de operaciones activas, incluyendo par, cantidad, precio de compra, highestPrice, stopPercent y fecha de creación.
+	•	La última operación completada, con datos de precio de venta, ganancia o pérdida porcentual y comisión aplicada.
+
+
+
+
+
+
+
+
 Aquí tienes la primera versión del bot que hicimos que recibe mensajes de Traidingview con el par que debe comprar, el trailing al que debe vender.
 
 Versión 1.0
