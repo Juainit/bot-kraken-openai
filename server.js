@@ -146,9 +146,7 @@ app.get("/historial/:par", async (req, res) => {
 
     res.json(result.rows);
   } catch (err) {
-    console.error(`❌ Error al obtener historial de ${par}:", err);
-    res.status(500).json({ error: "Error al obtener el historial de esta moneda" });
-  }
+    console.error(`❌ Error al obtener historial de ${par}:`, err);  }
 });
 
 const port = process.env.PORT || 3000;
