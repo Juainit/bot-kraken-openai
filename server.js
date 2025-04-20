@@ -81,6 +81,32 @@ if (req.body.inversion) {
   }
 });
 
+app.get('/estado', async (req, res) => {
+  try {
+    const { rows: activos } = await pool.query(
+      `SELECT pair, quantity, buyPrice, highestPrice, stopPercent, createdAt
+       FROM trades
+       WHERE status = 'active'
+       ORDER BY createdAt DESC`
+    );
+
+    const { rows: completados } = await pool.query(
+      `SELECT pair, sellPrice, profitPercent, feeEUR, createdAt
+       FROM trades
+       WHERE status = 'completed'
+       ORDER BY createdAt DESC LIMIT 1`
+    );
+
+    res.json({
+      activos,
+      ultimo_completado: completados[0] || null
+    });
+  } catch (err) {
+    console.error("❌ Error en /estado:", err);
+    res.status(500).json({ error: "Error al consultar estado." });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
 });
