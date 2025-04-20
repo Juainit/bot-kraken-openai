@@ -1,54 +1,39 @@
 #!/bin/bash
 
-# Menú desplegable para tipo de venta
-tipo=$(osascript -e 'choose from list {"mercado", "límite"} with prompt "¿Cómo quieres vender?" default items {"mercado"}')
-tipo=$(echo $tipo | tr -d '{}"') # limpiar salida
+# Preguntar el par
+par=$(osascript -e 'Tell application "System Events" to display dialog "¿Qué par deseas vender? (Ej: ADAEUR, TAOUSD...)" default answer ""' -e 'text returned of result' 2>/dev/null)
 
-# Si se cancela el diálogo
-if [ "$tipo" == "false" ] || [ -z "$tipo" ]; then
-  echo "❌ Cancelado por el usuario"
+# Preguntar tipo de orden
+tipo=$(osascript -e 'Tell application "System Events" to choose from list {"mercado", "limite"} with prompt "Selecciona el tipo de venta:"' 2>/dev/null)
+
+if [ "$tipo" = "false" ]; then
+  echo "Cancelado."
   exit 1
 fi
 
-# Solicitar el par
-par=$(osascript -e 'text returned of (display dialog "¿Qué par quieres vender?" default answer "")')
-if [ -z "$par" ]; then
-  echo "❌ No se especificó ningún par"
-  exit 1
+tipo=${tipo:1:-1}  # Elimina paréntesis de la salida del diálogo
+
+# Preguntar porcentaje
+porcentaje=$(osascript -e 'Tell application "System Events" to display dialog "¿Qué porcentaje deseas vender? (Ej: 100 para todo)" default answer "100"' -e 'text returned of result' 2>/dev/null)
+
+# Si es límite, preguntar precio límite
+if [ "$tipo" = "limite" ]; then
+  precioLimite=$(osascript -e 'Tell application "System Events" to display dialog "¿Precio límite?" default answer ""' -e 'text returned of result' 2>/dev/null)
 fi
 
-# Solicitar el porcentaje
-porcentaje=$(osascript -e 'text returned of (display dialog "¿Qué porcentaje quieres vender?" default answer "100")')
-if [ -z "$porcentaje" ]; then
-  echo "❌ No se especificó porcentaje"
-  exit 1
-fi
-
-# Si es límite, pedir el precio
-if [ "$tipo" == "límite" ]; then
-  precio=$(osascript -e 'text returned of (display dialog "¿A qué precio límite quieres vender?" default answer "")')
-  if [ -z "$precio" ]; then
-    echo "❌ No se especificó precio límite"
-    exit 1
-  fi
-fi
-
-# Enviar a servidor
 echo "🚀 Enviando orden de venta $tipo para $par..."
 
-# Armar JSON
-if [ "$tipo" == "límite" ]; then
-  json=$(jq -n --arg par "$par" --arg tipo "$tipo" --arg porcentaje "$porcentaje" --arg precio "$precio" \
-    '{par: $par, tipo: $tipo, porcentaje: ($porcentaje | tonumber), precio: ($precio | tonumber)}')
-else
-  json=$(jq -n --arg par "$par" --arg tipo "$tipo" --arg porcentaje "$porcentaje" \
-    '{par: $par, tipo: $tipo, porcentaje: ($porcentaje | tonumber)}')
+# Construir el JSON
+json="{\"pair\":\"$par\",\"tipo\":\"$tipo\",\"porcentaje\":$porcentaje"
+if [ "$tipo" = "limite" ]; then
+  json="$json, \"precioLimite\":$precioLimite"
 fi
+json="$json}"
 
-# Ejecutar curl
-respuesta=$(curl -s -X POST http://localhost:3000/vender \
+# Enviar la solicitud
+curl -X POST https://bot-kraken-openai-production.up.railway.app/vender \
   -H "Content-Type: application/json" \
-  -d "$json")
+  -d "$json"
 
-echo "$respuesta"
-osascript -e 'display dialog "✅ Orden enviada.\nPulsa ENTER para cerrar" buttons {"OK"}'
+echo ""
+read -p "Pulsa ENTER para cerrar"

@@ -149,68 +149,48 @@ app.get("/historial/:par", async (req, res) => {
 });
 
 app.post("/vender", async (req, res) => {
-  const { pair, tipo, cantidad, precio } = req.body;
-  const cleanPair = pair?.replace(/[^A-Z]/gi, "").toUpperCase();
+  const { pair, tipo, porcentaje, cantidad, precioLimite } = req.body;
 
-  if (!cleanPair || !tipo || !["mercado", "limite"].includes(tipo)) {
-    return res.status(400).json({
-      error: "Faltan campos obligatorios o tipo inválido ('mercado' o 'limite')",
-    });
-  }
-
-  if (tipo === "limite" && (typeof precio !== "number" || precio <= 0)) {
-    return res.status(400).json({
-      error: "Debe especificar 'precio' válido para orden límite",
-    });
+  if (!pair || !tipo || !["mercado", "limite"].includes(tipo)) {
+    return res.status(400).json({ error: "Faltan campos obligatorios o tipo inválido ('mercado' o 'limite')" });
   }
 
   try {
+    const cleanPair = pair.replace(/[^a-zA-Z]/g, "").toUpperCase();
     const balance = await kraken.getBalance();
     const baseAsset = cleanPair.slice(0, 3);
-    const totalDisponible = parseFloat(balance?.[baseAsset] || 0);
-    const montoAVender = cantidad ? parseFloat(cantidad) : totalDisponible;
+    const baseAmount = parseFloat(balance?.[baseAsset] || 0);
 
-    if (montoAVender > totalDisponible || montoAVender <= 0) {
-      return res.status(400).json({ error: "Cantidad inválida o saldo insuficiente" });
+    let cantidadFinal;
+
+    if (typeof porcentaje === "number") {
+      if (porcentaje <= 0 || porcentaje > 100) {
+        return res.status(400).json({ error: "El porcentaje debe estar entre 1 y 100" });
+      }
+      cantidadFinal = +(baseAmount * (porcentaje / 100)).toFixed(8);
+    } else if (typeof cantidad === "number") {
+      cantidadFinal = cantidad;
+    } else {
+      return res.status(400).json({ error: "Debe incluirse 'porcentaje' o 'cantidad'" });
     }
 
-    let result;
+    if (cantidadFinal <= 0.000001) {
+      return res.status(400).json({ error: "Cantidad final demasiado baja para operar" });
+    }
+
+    let orderId;
     if (tipo === "mercado") {
-      result = await kraken.sell(cleanPair, montoAVender);
+      orderId = await kraken.sell(cleanPair, cantidadFinal);
+      console.log(`✅ Venta a mercado: ${cantidadFinal} ${cleanPair}`);
     } else {
-      result = await kraken.sellLimit(cleanPair, montoAVender, precio);
+      if (!precioLimite || isNaN(precioLimite)) {
+        return res.status(400).json({ error: "Para ventas límite se requiere 'precioLimite'" });
+      }
+      orderId = await kraken.sellLimit(cleanPair, cantidadFinal, precioLimite);
+      console.log(`✅ Venta LÍMITE: ${cantidadFinal} ${cleanPair} a ${precioLimite}`);
     }
 
-    if (!result || !result.result?.txid?.[0]) {
-      return res.status(500).json({ error: "No se pudo ejecutar la orden" });
-    }
-
-    const orderId = result.result.txid[0];
-    const execution = await kraken.checkOrderExecuted(orderId);
-    const sellPrice = execution?.price || precio;
-    const feeEUR = execution?.fee || 0;
-
-    // Intentar encontrar el último trade activo para actualizar
-    const { rows } = await pool.query(
-      "SELECT * FROM trades WHERE pair = $1 AND status = 'active' ORDER BY createdAt DESC LIMIT 1",
-      [cleanPair]
-    );
-
-    if (rows.length > 0) {
-      const last = rows[0];
-      const profit = ((sellPrice - last.buyprice) / last.buyprice) * 100;
-
-      await pool.query(
-        "UPDATE trades SET sellPrice = $1, profitPercent = $2, feeEUR = $3, status = 'completed' WHERE id = $4",
-        [sellPrice.toFixed(5), profit.toFixed(2), feeEUR.toFixed(5), last.id]
-      );
-
-      console.log(`✅ Venta registrada para ${cleanPair}: ${montoAVender} a ${sellPrice}, fee: ${feeEUR}`);
-    } else {
-      console.log(`⚠️ Venta ejecutada sin entrada activa en DB para ${cleanPair}`);
-    }
-
-    res.status(200).json({ message: "Venta ejecutada correctamente", txid: orderId });
+    res.json({ mensaje: "Orden enviada", orderId });
   } catch (err) {
     console.error("❌ Error en /vender:", err);
     res.status(500).json({ error: "Error al procesar la venta" });
