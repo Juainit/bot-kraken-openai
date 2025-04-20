@@ -38,9 +38,9 @@ app.post("/alerta", async (req, res) => {
 
   try {
     const cleanPair = par.replace(/[^a-zA-Z]/g, "").toUpperCase();
-    const balance = await kraken.api("Balance");
+    const balance = await kraken.getBalance();
     const baseAsset = cleanPair.slice(0, 3);
-    const baseAmount = parseFloat(balance.result?.[baseAsset] || 0);
+    const baseAmount = parseFloat(balance?.[baseAsset] || 0);
 
     if (baseAmount > 10) {
       console.log(`⛔ Ya hay más de 10 unidades de ${baseAsset} en cartera. No se ejecuta compra.`);
@@ -71,16 +71,11 @@ app.post("/alerta", async (req, res) => {
       console.log(`🆕 Primer trade registrado, usando inversión por defecto de 40 EUR`);
     }
 
-    const ticker = await kraken.api("Ticker", { pair: cleanPair });
-    const marketPrice = parseFloat(ticker.result[cleanPair].c[0]);
+    const ticker = await kraken.getTicker(cleanPair);
+    const marketPrice = parseFloat(ticker);
     const quantity = +(inversionEUR / marketPrice).toFixed(8);
 
-    const order = await kraken.api("AddOrder", {
-      pair: cleanPair,
-      type: "buy",
-      ordertype: "market",
-      volume: quantity.toString(),
-    });
+    const orderId = await kraken.buy(cleanPair, quantity);
 
     await pool.query(
       "INSERT INTO trades (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt) VALUES ($1, $2, $3, $4, $5, 'active', NOW())",
@@ -89,6 +84,7 @@ app.post("/alerta", async (req, res) => {
 
     console.log(`✅ COMPRA ejecutada: ${quantity} ${cleanPair} a ${marketPrice}`);
     res.status(200).json({ message: "Compra ejecutada correctamente" });
+
   } catch (err) {
     console.error("❌ Error en /alerta:", err);
     res.status(500).json({ error: "Error al procesar la alerta" });
@@ -115,6 +111,7 @@ app.get("/estado", async (req, res) => {
       activos,
       ultimo_completado: completados[0] || null
     });
+
   } catch (err) {
     console.error("❌ Error en /estado:", err);
     res.status(500).json({ error: "Error al consultar estado." });
@@ -146,11 +143,12 @@ app.get("/historial/:par", async (req, res) => {
 
     res.json(result.rows);
   } catch (err) {
-    console.error(`❌ Error al obtener historial de ${par}:`, err);  }
+    console.error(`❌ Error al obtener historial de ${par}:`, err);
+    res.status(500).json({ error: "Error al obtener el historial de esta moneda" });
+  }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${port}`);
 });
-
