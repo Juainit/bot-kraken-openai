@@ -3,6 +3,19 @@ const KrakenClient = require('kraken-api');
 
 const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
 
+function interpretarErrorKraken(errorArray) {
+  if (!Array.isArray(errorArray)) return 'Error desconocido';
+
+  if (errorArray.some(e => e.includes('EQuery:Unknown asset pair'))) {
+    return 'Par no válido o mal escrito';
+  }
+  if (errorArray.some(e => e.includes('EOrder:Insufficient funds'))) {
+    return 'Fondos insuficientes para operar';
+  }
+
+  return errorArray.join(' | ');
+}
+
 async function getCurrentPrice(par) {
   try {
     const ticker = await kraken.api('Ticker', { pair: par });
@@ -10,7 +23,8 @@ async function getCurrentPrice(par) {
     console.log(`📈 Precio actual de ${par}: ${price}`);
     return price;
   } catch (error) {
-    console.error(`❌ Error al obtener precio de ${par}:`, error.message);
+    const mensaje = interpretarErrorKraken(error.error || []);
+    console.error(`❌ Error al obtener precio de ${par}: ${mensaje}`);
     return null;
   }
 }
@@ -28,7 +42,8 @@ async function sellLimit(par, cantidad, precio) {
     console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precio.toFixed(5)}`);
     return order.result.txid[0];
   } catch (error) {
-    console.error(`❌ Error al colocar orden límite de ${par}:`, error.message);
+    const mensaje = interpretarErrorKraken(error.error || []);
+    console.error(`❌ Error al colocar orden límite de ${par}: ${mensaje}`);
     return null;
   }
 }
@@ -45,7 +60,8 @@ async function sell(par, cantidad) {
     console.log(`💰 Venta a mercado ejecutada: ${cantidad} ${par}`);
     return order;
   } catch (error) {
-    console.error(`❌ Error al vender ${par}:`, error.message);
+    const mensaje = interpretarErrorKraken(error.error || []);
+    console.error(`❌ Error al vender ${par}: ${mensaje}`);
     return null;
   }
 }
@@ -56,7 +72,8 @@ async function cancelOrder(orderId) {
     console.log(`🛑 Orden cancelada: ${orderId}`);
     return cancel;
   } catch (error) {
-    console.error(`❌ Error al cancelar orden ${orderId}:`, error.message);
+    const mensaje = interpretarErrorKraken(error.error || []);
+    console.error(`❌ Error al cancelar orden ${orderId}: ${mensaje}`);
     return null;
   }
 }
@@ -67,13 +84,17 @@ async function checkOrderExecuted(orderId) {
     const order = info.result[orderId];
 
     if (order.status === 'closed' && parseFloat(order.vol_exec) > 0) {
-      const executedPrice = parseFloat(order.price);
-      return executedPrice;
+      return {
+        price: parseFloat(order.price),
+        fee: parseFloat(order.fee),
+        status: order.status
+      };
     }
 
     return null;
   } catch (error) {
-    console.error(`❌ Error al consultar estado de orden ${orderId}:`, error.message);
+    const mensaje = interpretarErrorKraken(error.error || []);
+    console.error(`❌ Error al consultar estado de orden ${orderId}: ${mensaje}`);
     return null;
   }
 }
