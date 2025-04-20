@@ -15,9 +15,20 @@ const client = new Client({
 const ordenesLimitadas = new Map(); // Guardamos ordenes pendientes por par
 const preciosStop = new Map(); // Guardamos el stopPrice real por par
 
+// ✅ Conexión al iniciar
+client.connect()
+  .then(() => {
+    console.log("🛢️ Conectado a PostgreSQL");
+
+    // ⏲️ Ejecutar el bot cada minuto
+    setInterval(updateTrades, 60 * 1000);
+  })
+  .catch(err => {
+    console.error("❌ Error al conectar a la base de datos:", err);
+  });
+
 async function updateTrades() {
   try {
-    await client.connect();
     const res = await client.query("SELECT * FROM trades WHERE status = 'active'");
 
     for (const trade of res.rows) {
@@ -71,9 +82,5 @@ async function updateTrades() {
     }
   } catch (err) {
     console.error("❌ Error en updateTrades:", err);
-  } finally {
-    await client.end();
   }
 }
-
-setInterval(updateTrades, 60 * 1000);
