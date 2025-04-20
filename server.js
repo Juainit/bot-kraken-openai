@@ -148,6 +148,70 @@ app.get("/historial/:par", async (req, res) => {
   }
 });
 
+app.post("/vender", async (req, res) => {
+  const { par, tipo, porcentaje, precio } = req.body;
+
+  if (!par || !tipo || !porcentaje) {
+    return res.status(400).json({ error: "Faltan campos obligatorios: par, tipo, porcentaje" });
+  }
+
+  const cleanPair = par.replace(/[^a-zA-Z]/g, "").toUpperCase();
+  const quantityPercent = parseFloat(porcentaje);
+
+  try {
+    const balance = await kraken.getBalance();
+    const baseAsset = cleanPair.slice(0, 3);
+    const amountHeld = parseFloat(balance?.[baseAsset] || 0);
+
+    if (amountHeld === 0) {
+      return res.status(400).json({ error: `No hay ${baseAsset} en cartera para vender.` });
+    }
+
+    const amountToSell = +(amountHeld * (quantityPercent / 100)).toFixed(8);
+
+    let orderResult;
+    let sellPrice = null;
+    let feeEUR = 0;
+
+    if (tipo === "mercado") {
+      orderResult = await kraken.sell(cleanPair, amountToSell);
+      if (orderResult?.result?.txid?.[0]) {
+        const orderId = orderResult.result.txid[0];
+        const executed = await kraken.checkOrderExecuted(orderId);
+        if (executed) {
+          sellPrice = executed.price;
+          feeEUR = executed.fee;
+        }
+      }
+    } else if (tipo === "límite") {
+      if (!precio) {
+        return res.status(400).json({ error: "Debes especificar el precio para la venta límite." });
+      }
+      const limitOrderId = await kraken.sellLimit(cleanPair, amountToSell, parseFloat(precio));
+      return res.json({ mensaje: `🧷 Venta límite colocada para ${cleanPair}`, txid: limitOrderId });
+    } else {
+      return res.status(400).json({ error: "Tipo de venta no válido (usa 'mercado' o 'límite')" });
+    }
+
+    if (sellPrice !== null) {
+      await pool.query(
+        `INSERT INTO trades (pair, quantity, sellPrice, feeEUR, status, createdAt)
+         VALUES ($1, $2, $3, $4, 'completed', NOW())`,
+        [cleanPair, amountToSell, sellPrice.toFixed(5), feeEUR.toFixed(5)]
+      );
+
+      console.log(`💰 Venta a mercado de ${amountToSell} ${cleanPair} a ${sellPrice}`);
+      return res.json({ mensaje: `Venta completada: ${cleanPair} @ ${sellPrice}` });
+    } else {
+      return res.status(500).json({ error: "No se pudo confirmar ejecución de la orden." });
+    }
+
+  } catch (err) {
+    console.error("❌ Error en /vender:", err);
+    res.status(500).json({ error: "Error al procesar la venta" });
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${port}`);
