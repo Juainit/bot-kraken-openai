@@ -16,7 +16,15 @@ async function updateTrades() {
     );
 
     for (const trade of tradesActivos) {
-      const { id, pair, quantity, buyprice, highestprice, stoppercent, limitorderid } = trade;
+      const {
+        id,
+        pair,
+        quantity,
+        buyprice,
+        highestprice,
+        stoppercent,
+        limitorderid,
+      } = trade;
 
       const marketPrice = await kraken.getTicker(pair);
       if (!marketPrice) continue;
@@ -24,15 +32,18 @@ async function updateTrades() {
       const nuevaHighest = Math.max(highestprice, marketPrice);
       const stopPrice = nuevaHighest * (1 - stoppercent / 100);
 
-      // Actualiza highestPrice si ha subido
+      // 📈 Actualiza highestPrice si ha subido
       if (nuevaHighest > highestprice) {
-        await pool.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [nuevaHighest, id]);
+        await pool.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [
+          nuevaHighest,
+          id,
+        ]);
 
-        // Si hay una orden LIMIT activa registrada, la cancelamos
+        // ❌ Cancela orden LIMIT si el precio subió
         if (limitorderid) {
           await kraken.cancelOrder(limitorderid);
-          await pool.query("UPDATE trades SET limitOrderId = NULL WHERE id = $1", [id]);
-          console.log(`❌ Orden LIMIT cancelada porque el precio subió: ${pair}`);
+          await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [id]);
+          console.log(`❌ Orden LIMIT cancelada por subida de precio: ${pair}`);
         }
       }
 
@@ -41,13 +52,22 @@ async function updateTrades() {
       if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
 
+        // ❌ Cancela orden límite antes de vender a mercado
+        if (limitorderid) {
+          await kraken.cancelOrder(limitorderid);
+          await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [id]);
+          console.log(`❌ Orden LIMIT cancelada antes de venta de emergencia: ${pair}`);
+        }
+
         const balance = await kraken.getBalance();
         const baseAsset = pair.slice(0, 3);
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
         if (cantidadVendible < 0.00001) {
-          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`);
+          console.warn(
+            `⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`
+          );
           continue;
         }
 
@@ -60,7 +80,7 @@ async function updateTrades() {
         const txid = orden.result.txid[0];
         const ejecucion = await kraken.checkOrderExecuted(txid);
 
-        if (!ejecucion || ejecucion.status !== 'closed') {
+        if (!ejecucion || ejecucion.status !== "closed") {
           console.warn(`⏳ Venta no ejecutada aún para ${pair}`);
           continue;
         }
@@ -77,7 +97,7 @@ async function updateTrades() {
 
         console.log(`✅ VENTA de emergencia ejecutada: ${cantidadVendible} ${pair} a ${sellPrice}`);
       } else {
-        // Si ya hay una orden LIMIT registrada, no volvemos a crearla
+        // ⏸ Si ya hay una orden LIMIT registrada, no volvemos a crearla
         if (limitorderid) {
           console.log(`⏸ Ya existe orden LIMIT para ${pair}, no se repite`);
           continue;
@@ -91,7 +111,9 @@ async function updateTrades() {
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
         if (cantidadVendible < 0.00001) {
-          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`);
+          console.warn(
+            `⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`
+          );
           continue;
         }
 
@@ -99,7 +121,10 @@ async function updateTrades() {
         if (!orderId) {
           console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
         } else {
-          await pool.query("UPDATE trades SET limitOrderId = $1 WHERE id = $2", [orderId, id]);
+          await pool.query("UPDATE trades SET limitorderid = $1 WHERE id = $2", [
+            orderId,
+            id,
+          ]);
           console.log(`📌 Orden LIMIT colocada para ${pair} a ${precioLimite}`);
         }
       }
