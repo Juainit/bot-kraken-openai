@@ -61,18 +61,17 @@ async function buy(par, cantidad) {
 async function sellLimit(par, cantidad, precio) {
   try {
     const volume = cantidad.toString();
-    const priceStr = precio.toFixed(5);
     const order = await kraken.api("AddOrder", {
       pair: par,
       type: "sell",
       ordertype: "limit",
       volume: volume,
-      price: priceStr,
-      oflags: "post" // garantiza que no se ejecute como mercado
+      price: precio.toFixed(5),
     });
-    console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${priceStr}`);
+    console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precio.toFixed(5)}`);
     return order.result.txid[0];
   } catch (error) {
+    console.error(`❌ Error bruto Kraken en sellLimit:`, error); // <--- AÑADE ESTO
     const mensaje = interpretarErrorKraken(error.error || []);
     console.error(`❌ Error al colocar orden límite de ${par}: ${mensaje}`);
     return null;
