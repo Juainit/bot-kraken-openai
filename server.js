@@ -197,6 +197,24 @@ app.post("/vender", async (req, res) => {
   }
 });
 
+const sincronizarTrades = require("./sincronizador");
+
+app.get("/sincronizar", async (req, res) => {
+  const auth = req.query.token;
+  if (auth !== process.env.SYNC_TOKEN) {
+    return res.status(403).send("🚫 Acceso denegado.");
+  }
+
+  try {
+    console.log("🔄 Llamada externa para sincronización recibida");
+    await sincronizarTrades();
+    res.status(200).send("✅ Sincronización completada.");
+  } catch (error) {
+    console.error("❌ Error al sincronizar:", error);
+    res.status(500).send("❌ Fallo en la sincronización.");
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en el puerto ${port}`);
