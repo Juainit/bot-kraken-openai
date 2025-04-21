@@ -1,10 +1,13 @@
 const sincronizar = require("./sincronizador");
 
-console.log("⏱️ Arrancando ciclo de sincronización cada 15 minutos...");
+console.log("⏱️ Ejecutando sincronización única...");
 
-setInterval(() => {
-  sincronizar();
-}, 15 * 60 * 1000); // cada 15 minutos
-
-// Llamada inicial
-sincronizar();
+sincronizar()
+  .then(() => {
+    console.log("✅ Sincronización finalizada. Cerrando...");
+    process.exit(0); // Finaliza correctamente el proceso
+  })
+  .catch((error) => {
+    console.error("❌ Error durante la sincronización:", error);
+    process.exit(1); // Finaliza con error si falla
+  });
