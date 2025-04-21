@@ -1,12 +1,19 @@
-const db = require("./db");
+const { Pool } = require("pg");
 const kraken = require("./krakenClient");
 const dayjs = require("dayjs");
 
 console.log("🔄 Iniciando sincronización de trades completados...");
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
 async function sincronizarTrades() {
   try {
-    const trades = await db.all(`SELECT * FROM trades WHERE status = 'completed'`);
+    const { rows: trades } = await pool.query(`SELECT * FROM trades WHERE status = 'completed'`);
 
     for (const trade of trades) {
       const pair = trade.pair.toUpperCase().replace("/", "");
@@ -22,24 +29,22 @@ async function sincronizarTrades() {
         const sellTime = dayjs.unix(match.closetm).toISOString();
         const profitPercent = ((sellPrice - trade.buyprice) / trade.buyprice) * 100;
 
-        await db.run(
+        await pool.query(
           `UPDATE trades
-           SET sellprice = ?,
+           SET sellprice = $1,
                status = 'completed',
-               profitpercent = ?,
-               createdat = createdat
-           WHERE id = ?`,
-          [sellPrice, profitPercent, trade.id]
+               profitpercent = $2,
+               selltime = $3
+           WHERE id = $4`,
+          [sellPrice, profitPercent, sellTime, trade.id]
         );
 
         console.log(`✅ Trade ${trade.id} sincronizado con venta a ${sellPrice}`);
       }
     }
-
-    console.log("🟢 Sincronización completada.");
   } catch (error) {
     console.error("❌ Error al sincronizar:", error);
   }
 }
 
-sincronizarTrades();
+module.exports = sincronizarTrades;
