@@ -66,7 +66,7 @@ async function sellLimit(par, cantidad, precio) {
       type: "sell",
       ordertype: "limit",
       volume: volume,
-      price: precio.toFixed(5),
+      price: parseFloat(precio.toFixed(4)),
     });
     console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precio.toFixed(5)}`);
     return order.result.txid[0];
