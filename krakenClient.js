@@ -153,5 +153,6 @@ module.exports = {
   sell,
   sellLimit,
   cancelOrder,
-  checkOrderExecuted
+  checkOrderExecuted,
+  api: (...args) => kraken.api(...args) // 🔧 AÑADE ESTA LÍNEA
 };
