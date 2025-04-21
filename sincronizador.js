@@ -1,56 +1,45 @@
-require("dotenv").config();
-const { Client } = require("pg");
-const KrakenClient = require("kraken-api");
+const db = require("./db");
+const kraken = require("./krakenClient");
+const dayjs = require("dayjs");
 
-const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
+console.log("🔄 Iniciando sincronización de trades completados...");
 
 async function sincronizarTrades() {
-  console.log("🔄 Iniciando sincronización de trades cerrados...");
-  const client = new Client({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-  });
-
   try {
-    await client.connect();
+    const trades = await db.all(`SELECT * FROM trades WHERE status = 'completed'`);
 
-    const { rows: openTrades } = await client.query(`
-      SELECT * FROM trades
-      WHERE status = 'abierto'
-    `);
+    for (const trade of trades) {
+      const pair = trade.pair.toUpperCase().replace("/", "");
+      const krakenTrades = await kraken.api("ClosedOrders", {});
 
-    for (const trade of openTrades) {
-      const pair = trade.pair.replace("/", "").toUpperCase();
-      const { result } = await kraken.api("Balance");
+      const closedOrders = krakenTrades.result.closed || {};
+      const match = Object.values(closedOrders).find(
+        (order) => order.descr.pair === pair && order.status === "closed"
+      );
 
-      const base = pair.replace("USD", "").replace("EUR", "");
-      const balance = parseFloat(result[base] || "0");
+      if (match && !trade.sellprice) {
+        const sellPrice = parseFloat(match.price);
+        const sellTime = dayjs.unix(match.closetm).toISOString();
+        const profitPercent = ((sellPrice - trade.buyprice) / trade.buyprice) * 100;
 
-      if (balance < trade.quantity * 0.01) {
-        const sellPrice = trade.highestPrice;
-        const profit = ((sellPrice - trade.buyPrice) / trade.buyPrice) * 100;
+        await db.run(
+          `UPDATE trades
+           SET sellprice = ?,
+               status = 'completed',
+               profitpercent = ?,
+               createdat = createdat
+           WHERE id = ?`,
+          [sellPrice, profitPercent, trade.id]
+        );
 
-        await client.query(`
-          UPDATE trades
-          SET status = 'cerrado',
-              sellPrice = $1,
-              sellTime = NOW(),
-              profitPercent = $2
-          WHERE id = $3
-        `, [sellPrice, profit.toFixed(2), trade.id]);
-
-        console.log(`✅ Trade cerrado sincronizado: ${trade.pair}, ID: ${trade.id}`);
-      } else {
-        console.log(`📈 Trade sigue abierto: ${trade.pair}, balance: ${balance}`);
+        console.log(`✅ Trade ${trade.id} sincronizado con venta a ${sellPrice}`);
       }
     }
 
-    await client.end();
     console.log("🟢 Sincronización completada.");
   } catch (error) {
     console.error("❌ Error al sincronizar:", error);
-    await client.end();
   }
 }
 
-module.exports = sincronizarTrades;
+sincronizarTrades();
