@@ -1,119 +1,100 @@
-console.log("⏱️ tradeManager iniciado");
-
-require("dotenv").config();
-const { Client } = require("pg");
+const { Pool } = require("pg");
 const kraken = require("./krakenClient");
+require("dotenv").config();
 
-const client = new Client({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL.includes("railway")
     ? { rejectUnauthorized: false }
     : false,
 });
 
-const ordenesLimitadas = new Map();
-const preciosStop = new Map();
-
-client.connect()
-  .then(() => {
-    console.log("🛢️ Conectado a PostgreSQL");
-    setInterval(updateTrades, 60 * 1000);
-  })
-  .catch(err => console.error("❌ Error al conectar a la base de datos:", err));
-
 async function updateTrades() {
   try {
-    const res = await client.query("SELECT * FROM trades WHERE status = 'active'");
+    const { rows: tradesActivos } = await pool.query(
+      "SELECT * FROM trades WHERE status = 'active'"
+    );
 
-    for (const trade of res.rows) {
-      const { pair, quantity, highestprice, stoppercent, buyprice, id } = trade;
+    for (const trade of tradesActivos) {
+      const { id, pair, quantity, buyprice, highestprice, stoppercent } = trade;
 
-      const price = await kraken.getTicker(pair);
-      if (!price) continue;
+      const marketPrice = await kraken.getTicker(pair);
+      if (!marketPrice) continue;
 
       const stopPrice = highestprice * (1 - stoppercent / 100);
-      const preLimitTrigger = highestprice * (1 - 0.75 * stoppercent / 100);
-      const emergencyTrigger = stopPrice * 0.8;
+      const nuevaHighest = Math.max(highestprice, marketPrice);
 
-      preciosStop.set(pair, stopPrice);
+      await pool.query(
+        "UPDATE trades SET highestPrice = $1 WHERE id = $2",
+        [nuevaHighest, id]
+      );
 
-      // Validar si orden LIMIT anterior ya fue ejecutada
-      if (ordenesLimitadas.has(pair)) {
-        const orderId = ordenesLimitadas.get(pair);
-        const estado = await kraken.checkOrderExecuted(orderId);
-        if (estado && estado.status === "closed") {
-          const sellPrice = parseFloat(estado.price);
-          const fee = parseFloat(estado.fee || 0);
-          const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
+      console.log(`\n📈 Precio actual de ${pair}: ${marketPrice}`);
 
-          await client.query(
-            "UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2, feeEUR = $3 WHERE id = $4",
-            [sellPrice.toFixed(5), profitPercent.toFixed(2), fee.toFixed(5), id]
-          );
+      if (marketPrice < stopPrice) {
+        console.log(`🛑 Activado STOP para ${pair}`);
 
-          ordenesLimitadas.delete(pair);
-          preciosStop.delete(pair);
-          console.log(`✅ Orden LIMIT ejecutada: ${pair} @ ${sellPrice}, fee: ${fee}`);
-          continue;
-        }
-      }
+        // Validar cantidad vendible actual
+        const balance = await kraken.getBalance();
+        const baseAsset = pair.slice(0, 3);
+        const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
+        const cantidadVendible = Math.min(balanceDisponible, quantity);
 
-      // Si el precio sube → cancelar orden LIMIT y actualizar trailing
-      if (price > highestprice) {
-        await client.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [price, id]);
-        if (ordenesLimitadas.has(pair)) {
-          await kraken.cancelOrder(ordenesLimitadas.get(pair));
-          ordenesLimitadas.delete(pair);
-          console.log(`🔄 Orden limitada cancelada por subida: ${pair}`);
-        }
-        continue;
-      }
-
-      // Colocar orden limitada si no existe y cae 75 % del trailing
-      if (!ordenesLimitadas.has(pair) && price <= preLimitTrigger) {
-        const limitOrderId = await kraken.sellLimit(pair, quantity, stopPrice);
-        if (limitOrderId) {
-          ordenesLimitadas.set(pair, limitOrderId);
-          console.log(`🧷 Venta LIMIT colocada para ${pair} a ${stopPrice.toFixed(5)}`);
-        } else {
-          console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
-        }
-        continue;
-      }
-
-      // Venta de emergencia si cae por debajo del 80 % del trailing
-      if (ordenesLimitadas.has(pair) && price <= emergencyTrigger) {
-        console.log(`⚠️ Activando venta de emergencia para ${pair}`);
-        const sellOrder = await kraken.sell(pair, quantity);
-
-        if (!sellOrder || !sellOrder.result?.txid?.[0]) {
-          console.error(`❌ Venta de emergencia fallida para ${pair}: Kraken no devolvió txid.`);
+        if (cantidadVendible < 0.00001) {
+          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`);
           continue;
         }
 
-        const orderId = sellOrder.result.txid[0];
-        const executed = await kraken.checkOrderExecuted(orderId);
-
-        if (!executed) {
-          console.error(`❌ Kraken no confirma ejecución de venta de emergencia para ${pair}`);
+        const orden = await kraken.sell(pair, cantidadVendible);
+        if (!orden) {
+          console.error(`❌ No se pudo vender ${pair}`);
           continue;
         }
 
-        const sellPrice = executed.price;
-        const fee = executed.fee || 0;
+        const txid = orden.result.txid[0];
+        const ejecucion = await kraken.checkOrderExecuted(txid);
+
+        if (!ejecucion || ejecucion.status !== 'closed') {
+          console.warn(`⏳ Venta no ejecutada aún para ${pair}`);
+          continue;
+        }
+
+        const { price: sellPrice, fee } = ejecucion;
         const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
 
-        await client.query(
-          "UPDATE trades SET status = 'completed', sellPrice = $1, profitPercent = $2, feeEUR = $3 WHERE id = $4",
-          [sellPrice.toFixed(5), profitPercent.toFixed(2), fee.toFixed(5), id]
+        await pool.query(
+          `UPDATE trades 
+           SET status = 'completed', sellPrice = $1, feeEUR = $2, profitPercent = $3 
+           WHERE id = $4`,
+          [sellPrice, fee, profitPercent, id]
         );
 
-        ordenesLimitadas.delete(pair);
-        preciosStop.delete(pair);
-        console.log(`💥 Venta de emergencia ejecutada: ${pair} a ${sellPrice}, fee: ${fee}`);
+        console.log(`✅ VENTA de emergencia ejecutada: ${cantidadVendible} ${pair} a ${sellPrice}`);
+      } else {
+        // Intento de venta límite (si stop activado pero no aún por debajo)
+        const precioLimite = parseFloat((marketPrice * 1.01).toFixed(4));
+
+        const balance = await kraken.getBalance();
+        const baseAsset = pair.slice(0, 3);
+        const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
+        const cantidadVendible = Math.min(balanceDisponible, quantity);
+
+        if (cantidadVendible < 0.00001) {
+          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`);
+          continue;
+        }
+
+        const orderId = await kraken.sellLimit(pair, cantidadVendible, precioLimite);
+        if (!orderId) {
+          console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
+        } else {
+          console.log(`📌 Orden LIMIT colocada para ${pair} a ${precioLimite}`);
+        }
       }
     }
   } catch (err) {
     console.error("❌ Error en updateTrades:", err);
   }
 }
+
+setInterval(updateTrades, 15000);
