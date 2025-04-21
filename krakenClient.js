@@ -60,18 +60,35 @@ async function buy(par, cantidad) {
 
 async function sellLimit(par, cantidad, precio) {
   try {
+    // 1. Obtener metadata de pares desde Kraken
+    const assetPairsInfo = await kraken.api('AssetPairs');
+    const assetPairs = assetPairsInfo.result;
+
+    // 2. Buscar el par correcto en el diccionario
+    const pairInfo = Object.values(assetPairs).find(p => p.altname === par);
+    if (!pairInfo) {
+      throw new Error(`Par ${par} no encontrado en AssetPairs`);
+    }
+
+    // 3. Determinar la cantidad de decimales permitidos
+    const decimales = pairInfo.pair_decimals || 4; // Valor por defecto
+
+    // 4. Formatear precio al número de decimales
     const volume = cantidad.toString();
+    const precioFormateado = precio.toFixed(decimales);
+
+    // 5. Ejecutar orden de venta límite
     const order = await kraken.api("AddOrder", {
       pair: par,
       type: "sell",
       ordertype: "limit",
       volume: volume,
-      price: parseFloat(precio.toFixed(4)),
+      price: precioFormateado
     });
-    console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precio.toFixed(5)}`);
+
+    console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precioFormateado}`);
     return order.result.txid[0];
   } catch (error) {
-    console.error(`❌ Error bruto Kraken en sellLimit:`, error); // <--- AÑADE ESTO
     const mensaje = interpretarErrorKraken(error.error || []);
     console.error(`❌ Error al colocar orden límite de ${par}: ${mensaje}`);
     return null;
