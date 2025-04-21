@@ -16,25 +16,31 @@ async function updateTrades() {
     );
 
     for (const trade of tradesActivos) {
-      const { id, pair, quantity, buyprice, highestprice, stoppercent } = trade;
+      const { id, pair, quantity, buyprice, highestprice, stoppercent, limitorderid } = trade;
 
       const marketPrice = await kraken.getTicker(pair);
       if (!marketPrice) continue;
 
-      const stopPrice = highestprice * (1 - stoppercent / 100);
       const nuevaHighest = Math.max(highestprice, marketPrice);
+      const stopPrice = nuevaHighest * (1 - stoppercent / 100);
 
-      await pool.query(
-        "UPDATE trades SET highestPrice = $1 WHERE id = $2",
-        [nuevaHighest, id]
-      );
+      // Actualiza highestPrice si ha subido
+      if (nuevaHighest > highestprice) {
+        await pool.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [nuevaHighest, id]);
+
+        // Si hay una orden LIMIT activa registrada, la cancelamos
+        if (limitorderid) {
+          await kraken.cancelOrder(limitorderid);
+          await pool.query("UPDATE trades SET limitOrderId = NULL WHERE id = $1", [id]);
+          console.log(`❌ Orden LIMIT cancelada porque el precio subió: ${pair}`);
+        }
+      }
 
       console.log(`\n📈 Precio actual de ${pair}: ${marketPrice}`);
 
       if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
 
-        // Validar cantidad vendible actual
         const balance = await kraken.getBalance();
         const baseAsset = pair.slice(0, 3);
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
@@ -71,7 +77,12 @@ async function updateTrades() {
 
         console.log(`✅ VENTA de emergencia ejecutada: ${cantidadVendible} ${pair} a ${sellPrice}`);
       } else {
-        // Intento de venta límite (si stop activado pero no aún por debajo)
+        // Si ya hay una orden LIMIT registrada, no volvemos a crearla
+        if (limitorderid) {
+          console.log(`⏸ Ya existe orden LIMIT para ${pair}, no se repite`);
+          continue;
+        }
+
         const precioLimite = parseFloat((marketPrice * 1.01).toFixed(4));
 
         const balance = await kraken.getBalance();
@@ -88,6 +99,7 @@ async function updateTrades() {
         if (!orderId) {
           console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
         } else {
+          await pool.query("UPDATE trades SET limitOrderId = $1 WHERE id = $2", [orderId, id]);
           console.log(`📌 Orden LIMIT colocada para ${pair} a ${precioLimite}`);
         }
       }
