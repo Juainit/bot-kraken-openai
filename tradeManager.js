@@ -32,7 +32,6 @@ async function updateTrades() {
       const nuevaHighest = Math.max(highestprice, marketPrice);
       const stopPrice = parseFloat((nuevaHighest * (1 - stoppercent / 100)).toFixed(6));
 
-      // 📈 Actualiza highestPrice si ha subido
       if (nuevaHighest > highestprice) {
         await pool.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [
           nuevaHighest,
@@ -50,6 +49,11 @@ async function updateTrades() {
 
       const baseAsset = pair.replace(/(USD|EUR)$/, "");
       const balance = await kraken.getBalance();
+
+      if (!balance || Object.keys(balance).length === 0) {
+        console.warn(`⚠️ Kraken devolvió balance vacío para ${pair}. Se omite este ciclo.`);
+        continue;
+      }
 
       console.log(`💼 Analizando par: ${pair} → baseAsset: ${baseAsset}`);
       console.log(`📊 Balance Kraken devuelto:`, balance);
@@ -128,4 +132,4 @@ async function updateTrades() {
   }
 }
 
-setInterval(updateTrades, 15000);
+setInterval(updateTrades, 180000); // ← ¡cada 3 minutos!
