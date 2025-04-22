@@ -30,7 +30,7 @@ async function updateTrades() {
       if (!marketPrice) continue;
 
       const nuevaHighest = Math.max(highestprice, marketPrice);
-      const stopPrice = nuevaHighest * (1 - stoppercent / 100);
+      const stopPrice = parseFloat((nuevaHighest * (1 - stoppercent / 100)).toFixed(6));
 
       // 📈 Actualiza highestPrice si ha subido
       if (nuevaHighest > highestprice) {
@@ -52,7 +52,6 @@ async function updateTrades() {
       if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
 
-        // ❌ Cancela orden límite antes de vender a mercado
         if (limitorderid) {
           await kraken.cancelOrder(limitorderid);
           await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [id]);
@@ -65,9 +64,7 @@ async function updateTrades() {
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
         if (cantidadVendible < 0.00001) {
-          console.warn(
-            `⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`
-          );
+          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`);
           continue;
         }
 
@@ -97,13 +94,10 @@ async function updateTrades() {
 
         console.log(`✅ VENTA de emergencia ejecutada: ${cantidadVendible} ${pair} a ${sellPrice}`);
       } else {
-        // ⏸ Si ya hay una orden LIMIT registrada, no volvemos a crearla
         if (limitorderid) {
           console.log(`⏸ Ya existe orden LIMIT para ${pair}, no se repite`);
           continue;
         }
-
-        const precioLimite = parseFloat((marketPrice * 1.01).toFixed(4));
 
         const balance = await kraken.getBalance();
         const baseAsset = pair.slice(0, 3);
@@ -111,13 +105,11 @@ async function updateTrades() {
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
         if (cantidadVendible < 0.00001) {
-          console.warn(
-            `⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`
-          );
+          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`);
           continue;
         }
 
-        const orderId = await kraken.sellLimit(pair, cantidadVendible, precioLimite);
+        const orderId = await kraken.sellLimit(pair, cantidadVendible, stopPrice);
         if (!orderId) {
           console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
         } else {
@@ -125,7 +117,7 @@ async function updateTrades() {
             orderId,
             id,
           ]);
-          console.log(`📌 Orden LIMIT colocada para ${pair} a ${precioLimite}`);
+          console.log(`📌 Orden LIMIT colocada para ${pair} al STOP: ${stopPrice}`);
         }
       }
     }
