@@ -49,6 +49,11 @@ async function updateTrades() {
       console.log(`\n📈 Precio actual de ${pair}: ${marketPrice}`);
 
       const baseAsset = pair.replace(/(USD|EUR)$/, "");
+      const balance = await kraken.getBalance();
+
+      console.log(`💼 Analizando par: ${pair} → baseAsset: ${baseAsset}`);
+      console.log(`📊 Balance Kraken devuelto:`, balance);
+      console.log(`🔎 Balance detectado de ${baseAsset}: ${balance?.[baseAsset]}`);
 
       if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
@@ -59,7 +64,6 @@ async function updateTrades() {
           console.log(`❌ Orden LIMIT cancelada antes de venta de emergencia: ${pair}`);
         }
 
-        const balance = await kraken.getBalance();
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
@@ -99,7 +103,6 @@ async function updateTrades() {
           continue;
         }
 
-        const balance = await kraken.getBalance();
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
