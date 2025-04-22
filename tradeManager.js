@@ -157,20 +157,28 @@ if (creadoHaceMs < 120000) {
 
         console.log(`✅ VENTA ejecutada: ${cantidadVendible} ${pair} a ${sellPrice}`);
       } else if (!limitorderid) {
-        if (cantidadVendible < 0.00001) {
-          console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`);
-          continue;
-        }
-
-        const orderId = await kraken.sellLimit(pair, cantidadVendible, stopPrice);
-        if (!orderId) {
-          console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
+        // ✅ Colocar LIMIT solo si caída > 80% del trailing
+        const porcentajeCaida = 100 * (1 - marketPrice / highestprice);
+        const umbralLimite = stoppercent * 0.8; // 80% de la caída permitida
+      
+        if (porcentajeCaida >= umbralLimite) {
+          if (cantidadVendible < 0.00001) {
+            console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para colocar LIMIT en ${pair}`);
+            continue;
+          }
+      
+          const orderId = await kraken.sellLimit(pair, cantidadVendible, stopPrice);
+          if (!orderId) {
+            console.error(`❌ No se pudo colocar orden LIMIT para ${pair}`);
+          } else {
+            await pool.query("UPDATE trades SET limitorderid = $1 WHERE id = $2", [
+              orderId,
+              id,
+            ]);
+            console.log(`📌 Orden LIMIT colocada para ${pair} al STOP: ${stopPrice}`);
+          }
         } else {
-          await pool.query("UPDATE trades SET limitorderid = $1 WHERE id = $2", [
-            orderId,
-            id,
-          ]);
-          console.log(`📌 Orden LIMIT colocada para ${pair} al STOP: ${stopPrice}`);
+          console.log(`📉 Caída aún suave para ${pair}, no se coloca LIMIT. Caída: ${porcentajeCaida.toFixed(2)}%`);
         }
       } else {
         console.log(`⏸ Ya existe orden LIMIT para ${pair}, no se repite`);
