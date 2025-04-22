@@ -39,7 +39,6 @@ async function updateTrades() {
           id,
         ]);
 
-        // ❌ Cancela orden LIMIT si el precio subió
         if (limitorderid) {
           await kraken.cancelOrder(limitorderid);
           await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [id]);
@@ -48,6 +47,8 @@ async function updateTrades() {
       }
 
       console.log(`\n📈 Precio actual de ${pair}: ${marketPrice}`);
+
+      const baseAsset = pair.replace(/(USD|EUR)$/, "");
 
       if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
@@ -59,7 +60,6 @@ async function updateTrades() {
         }
 
         const balance = await kraken.getBalance();
-        const baseAsset = pair.slice(0, 3);
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
@@ -100,7 +100,6 @@ async function updateTrades() {
         }
 
         const balance = await kraken.getBalance();
-        const baseAsset = pair.slice(0, 3);
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
