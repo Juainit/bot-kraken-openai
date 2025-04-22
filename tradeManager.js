@@ -9,13 +9,51 @@ const pool = new Pool({
     : false,
 });
 
+// Cache para almacenar precios y evitar consultas repetidas
+const priceCache = {};
+const CACHE_DURATION = 60000; // 1 minuto en milisegundos
+
+async function getCachedPrice(pair) {
+  const now = Date.now();
+  
+  if (priceCache[pair] && (now - priceCache[pair].timestamp) < CACHE_DURATION) {
+    return priceCache[pair].price;
+  }
+
+  const price = await kraken.getTicker(pair);
+  if (price) {
+    priceCache[pair] = {
+      price: price,
+      timestamp: now
+    };
+  }
+  return price;
+}
+
 async function updateTrades() {
   try {
     const { rows: tradesActivos } = await pool.query(
       "SELECT * FROM trades WHERE status = 'active'"
     );
 
-    for (const trade of tradesActivos) {
+    if (tradesActivos.length === 0) {
+      console.log("⏭ No hay trades activos, omitiendo ciclo");
+      return;
+    }
+
+    // Primero obtenemos todos los precios necesarios en una sola pasada
+    const pricePromises = tradesActivos.map(trade => getCachedPrice(trade.pair));
+    const prices = await Promise.all(pricePromises);
+
+    for (let i = 0; i < tradesActivos.length; i++) {
+      const trade = tradesActivos[i];
+      const marketPrice = prices[i];
+      
+      if (!marketPrice) {
+        console.warn(`⚠️ No se pudo obtener precio para ${trade.pair}, omitiendo`);
+        continue;
+      }
+
       const {
         id,
         pair,
@@ -25,9 +63,6 @@ async function updateTrades() {
         stoppercent,
         limitorderid,
       } = trade;
-
-      const marketPrice = await kraken.getTicker(pair);
-      if (!marketPrice) continue;
 
       const nuevaHighest = Math.max(highestprice, marketPrice);
       const stopPrice = parseFloat((nuevaHighest * (1 - stoppercent / 100)).toFixed(6));
@@ -54,10 +89,6 @@ async function updateTrades() {
         console.warn(`⚠️ Kraken devolvió balance vacío para ${pair}. Se omite este ciclo.`);
         continue;
       }
-
-      console.log(`💼 Analizando par: ${pair} → baseAsset: ${baseAsset}`);
-      console.log(`📊 Balance Kraken devuelto:`, balance);
-      console.log(`🔎 Balance detectado de ${baseAsset}: ${balance?.[baseAsset]}`);
 
       if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
@@ -101,12 +132,7 @@ async function updateTrades() {
         );
 
         console.log(`✅ VENTA de emergencia ejecutada: ${cantidadVendible} ${pair} a ${sellPrice}`);
-      } else {
-        if (limitorderid) {
-          console.log(`⏸ Ya existe orden LIMIT para ${pair}, no se repite`);
-          continue;
-        }
-
+      } else if (!limitorderid) {
         const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
         const cantidadVendible = Math.min(balanceDisponible, quantity);
 
@@ -132,4 +158,5 @@ async function updateTrades() {
   }
 }
 
-setInterval(updateTrades, 180000); // ← ¡cada 3 minutos!
+// Aumentamos el intervalo a 5 minutos (300000 ms) para reducir peticiones
+setInterval(updateTrades, 300000);
