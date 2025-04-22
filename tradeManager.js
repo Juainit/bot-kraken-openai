@@ -48,6 +48,12 @@ async function updateTrades() {
 
     for (let i = 0; i < tradesActivos.length; i++) {
       const trade = tradesActivos[i];
+      // ⏳ Espera de 2 minutos antes de evaluar trailing
+const creadoHaceMs = Date.now() - new Date(trade.createdat).getTime();
+if (creadoHaceMs < 120000) {
+  console.log(`⏳ Trade ${trade.pair} creado hace menos de 2 minutos. Se omite este ciclo.`);
+  continue;
+}
       const marketPrice = prices[i];
       if (!marketPrice) {
         console.warn(`⚠️ No se pudo obtener precio para ${trade.pair}, omitiendo`);
@@ -83,7 +89,7 @@ async function updateTrades() {
       continue; // Ya no hay que procesar más este trade
     }
   }
-  
+
       const nuevaHighest = Math.max(highestprice, marketPrice);
       const stopPrice = parseFloat((nuevaHighest * (1 - stoppercent / 100)).toFixed(6));
 
