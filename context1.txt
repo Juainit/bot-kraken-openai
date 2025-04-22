@@ -20,11 +20,11 @@ GET /historial/:par: operaciones históricas filtradas por par
 === 2.2 tradeManager.js
 Proceso que monitorea continuamente los trades activos. Aplica trailing stop y ejecuta ventas automáticas:
 
-Coloca orden LIMIT si cae 75 % del margen
+Coloca orden LIMIT si cae al 80 % del trailing stop, crea el límit por el valor del límite inferior del trailing El stopPrice. (O sea, si
 
-Ejecuta venta a mercado si cae 20 % adicional
+Ejecuta venta a mercado si sigue cayendo después del la orden de venta límit (por si no se ha ejecutado). Para ello deberá cancelar la orden limit y después vender a mercado.
 
-Cancela orden LIMIT si el precio se recupera
+Por cierto, cancela la orden LIMIT si el precio se recupera y 
 
 Detecta ejecuciones completas y registra el fee
 
