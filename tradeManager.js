@@ -115,7 +115,40 @@ if (creadoHaceMs < 120000) {
       const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
       const cantidadVendible = Math.min(balanceDisponible, quantity);
 
-      if (marketPrice < stopPrice) {
+      
+      if (cantidadVendible < 0.00001) {
+        console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`);
+
+        if (limitorderid) {
+          const ejecucion = await kraken.checkOrderExecuted(limitorderid);
+
+          if (ejecucion?.status === "closed") {
+            const { price: sellPrice, fee } = ejecucion;
+            const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
+
+            await pool.query(
+              `UPDATE trades 
+               SET status = 'completed', sellPrice = $1, feeEUR = $2, profitPercent = $3, limitorderid = NULL 
+               WHERE id = $4`,
+              [sellPrice, fee, profitPercent, id]
+            );
+
+            console.log(`✅ Trade cerrado por ejecución de LIMIT (sin saldo): ${pair} a ${sellPrice}`);
+          } else {
+            console.log(`⏸ Orden LIMIT aún activa pero sin saldo: ${pair}`);
+          }
+        } else {
+          await pool.query(
+            `UPDATE trades SET status = 'cancelled' WHERE id = $1`,
+            [id]
+          );
+          console.log(`🚫 Trade cancelado automáticamente por saldo 0 sin LIMIT: ${pair}`);
+        }
+
+        continue;
+      }
+
+if (marketPrice < stopPrice) {
         console.log(`🛑 Activado STOP para ${pair}`);
 
         if (limitorderid) {
