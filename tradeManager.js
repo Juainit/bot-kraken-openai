@@ -192,7 +192,7 @@ if (marketPrice < stopPrice) {
       } else if (!limitorderid) {
         // ✅ Colocar LIMIT solo si caída > 80% del trailing
         const porcentajeCaida = Math.max(0, 100 * (1 - marketPrice / highestprice));
-        const umbralLimite = stoppercent * 0.8; // 80% de la caída permitida
+        const umbralLimite = stoppercent * 0.98; // 98% de la caída permitida
       
         if (porcentajeCaida >= umbralLimite) {
           if (cantidadVendible < 0.00001) {
