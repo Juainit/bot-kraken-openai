@@ -78,8 +78,19 @@ app.post("/alerta", async (req, res) => {
     const orderId = await kraken.buy(cleanPair, quantity);
 
     await pool.query(
-      "INSERT INTO trades (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt) VALUES ($1, $2, $3, $4, $5, 'active', NOW())",
-      [cleanPair, quantity, marketPrice, marketPrice, trailingStopPercent]
+      `INSERT INTO trades 
+        (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt, feeeur, limitorderid) 
+       VALUES 
+        ($1, $2, $3, $4, $5, 'active', NOW(), $6, $7)`,
+      [
+        cleanPair,               // $1
+        quantity,                // $2
+        marketPrice,             // $3
+        marketPrice,             // $4
+        trailingStopPercent,     // $5
+        0,                       // $6 → feeeur (por defecto 0)
+        null                     // $7 → limitorderid (por defecto null)
+      ]
     );
 
     console.log(`✅ COMPRA ejecutada: ${quantity} ${cleanPair} a ${marketPrice}`);
