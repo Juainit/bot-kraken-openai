@@ -79,7 +79,7 @@ app.post("/alerta", async (req, res) => {
 
     await pool.query(
       `INSERT INTO trades 
-        (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt, feeeur, limitorderid) 
+        (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt, feeEUR, limitorderid) 
        VALUES 
         ($1, $2, $3, $4, $5, 'active', NOW(), $6, $7)`,
       [
@@ -88,7 +88,7 @@ app.post("/alerta", async (req, res) => {
         marketPrice,             // $3
         marketPrice,             // $4
         trailingStopPercent,     // $5
-        0,                       // $6 → feeeur (por defecto 0)
+        0,                       // $6 → feeEUR (por defecto 0)
         null                     // $7 → limitorderid (por defecto null)
       ]
     );
