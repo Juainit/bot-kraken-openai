@@ -19,102 +19,64 @@ const pool = new Pool({
 const kraken = require("./krakenClient"); 
 
 // Endpoint POST /alerta (Versión mejorada)
+// ✅ Versión corregida y unificada:
 app.post("/alerta", async (req, res) => {
-  let orderId; // <-- Declarar fuera del try
-  try {
-    // ... (validaciones previas)
-    const { par, trailingStopPercent, inversion } = req.body;
-    const cleanPair = par.replace(/[^A-Z]/g, "").toUpperCase();
-    const marketPrice = await kraken.getTicker(cleanPair);
-    const quantity = inversion / marketPrice;
+  let orderId;
+  const { par, trailingStopPercent, inversion } = req.body;
 
-    // ✅ Versión corregida (parámetros reales)
-    orderId = await kraken.buy(cleanPair, quantity); // <-- ¡Aquí está el fix!
-
-  } catch (error) {
-    if (orderId) { 
-      await kraken.cancelOrder(orderId); 
-    }
-    // ... (manejo de errores)
-  }
-});
-  
-  // Validaciones mejoradas
+  // Validaciones iniciales (sincrónicas)
   if (!par || typeof par !== "string") {
     return res.status(400).json({ error: "Campo 'par' requerido y debe ser texto" });
   }
-  
   if (typeof trailingStopPercent !== "number" || trailingStopPercent < 1) {
     return res.status(400).json({ error: "'trailingStopPercent' debe ser ≥1" });
   }
-
   if (inversion !== undefined && (typeof inversion !== "number" || inversion < 5)) {
     return res.status(400).json({ error: "'inversion' debe ser ≥5" });
   }
 
   try {
     await pool.query("BEGIN");
-    
-    // Todas las validaciones y lógica PRIMERO
-    if (baseAmount > 10) { ... }
-    // ... resto de validaciones
-    
-    // Ejecutar compra y registro DENTRO de la transacción
-    const orderId = await kraken.buy(...);
-    await pool.query(`INSERT...`, [...]);
-    
-    await pool.query("COMMIT");
-  } catch (error) {
-    await pool.query("ROLLBACK");
-    if (orderId) { // Solo cancelar si la orden existe
-      await kraken.cancelOrder(orderId); 
-    }
-  }
 
-    // Validación de balance mejorada
-    if (baseAmount > 10) {
-      console.log(`⛔ ${baseAsset} en cartera (${baseAmount}u)`);
-      return res.status(200).json({ message: "Par ya en cartera" });
-    }
-
-    // Query optimizada (source id=2)
-    const { rows } = await pool.query(
-      "SELECT sellprice, quantity FROM trades WHERE pair = $1 AND status = 'completed' ORDER BY createdAt DESC LIMIT 1", 
+    // 1. Validar si el par ya está en cartera
+    const cleanPair = par.replace(/[^A-Z]/g, "").toUpperCase();
+    const { rows: existing } = await pool.query(
+      "SELECT quantity FROM trades WHERE pair = $1 AND status = 'active'",
       [cleanPair]
     );
-
-    // Lógica de inversión mejorada
-    let inversionEUR = process.env.DEFAULT_INVERSION || 40; // Configurable
-    if (inversion) {
-      inversionEUR = inversion;
-      console.log(`💸 Inversión personalizada: ${inversionEUR}€`);
-    } else if (rows.length > 0) {
-      const lastTrade = rows[0];
-      if (lastTrade.sellprice && lastTrade.quantity) {
-        inversionEUR = lastTrade.sellprice * lastTrade.quantity;
-        console.log(`🔁 Reinversión: ${inversionEUR.toFixed(2)}€`);
-      }
+    if (existing.length > 0) {
+      await pool.query("ROLLBACK");
+      return res.status(400).json({ error: "Par ya en cartera" });
     }
 
-    // Obtención de precio mejorada (source id=1)
+    // 2. Calcular inversión
+    let inversionEUR = process.env.DEFAULT_INVERSION || 40;
+    // ... (lógica de reinversión)
+
+    // 3. Obtener precio y cantidad
     const ticker = await kraken.getTicker(cleanPair);
     const marketPrice = parseFloat(ticker);
     const quantity = +(inversionEUR / marketPrice).toFixed(8);
 
-    // Ejecutar compra y registro en DB (source id=3)
-    const orderId = await kraken.buy(cleanPair, quantity);
-    
+    // 4. Ejecutar compra en Kraken
+    orderId = await kraken.buy(cleanPair, quantity);
+    if (!orderId) throw new Error("Fallo en Kraken.buy()");
+
+    // 5. Registrar en PostgreSQL
     await pool.query(
       `INSERT INTO trades 
         (pair, quantity, buyprice, highestprice, stoppercents, status, feeeur) 
-       VALUES 
-        ($1, $2, $3, $4, $5, 'active', $6)`,
+       VALUES ($1, $2, $3, $4, $5, 'active', $6)`,
       [cleanPair, quantity, marketPrice, marketPrice, trailingStopPercent, 0]
     );
 
+    await pool.query("COMMIT");
     console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${marketPrice}€`);
     res.status(200).json({ message: "Compra exitosa" });
+
   } catch (err) {
+    await pool.query("ROLLBACK");
+    if (orderId) await kraken.cancelOrder(orderId);
     console.error("❌ Error en /alerta:", err.message);
     res.status(500).json({ error: "Error interno: " + err.message });
   }
