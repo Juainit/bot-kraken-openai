@@ -20,7 +20,13 @@ const kraken = require("./krakenClient");
 
 // Endpoint POST /alerta (Versión mejorada)
 app.post("/alerta", async (req, res) => {
-  const { par, trailingStopPercent, inversion } = req.body;
+  let orderId; // <-- Declarar fuera del try
+  try {
+    // ...
+    orderId = await kraken.buy(...);
+  } catch (error) {
+    if (orderId) { ... } // ✅ Ahora es accesible
+  }
   
   // Validaciones mejoradas
   if (!par || typeof par !== "string") {
@@ -36,10 +42,23 @@ app.post("/alerta", async (req, res) => {
   }
 
   try {
-    const cleanPair = par.replace(/[^a-zA-Z]/g, "").toUpperCase();
-    const balance = await kraken.getBalance();
-    const baseAsset = cleanPair.slice(0, 3);
-    const baseAmount = parseFloat(balance?.[baseAsset] || 0);
+    await pool.query("BEGIN");
+    
+    // Todas las validaciones y lógica PRIMERO
+    if (baseAmount > 10) { ... }
+    // ... resto de validaciones
+    
+    // Ejecutar compra y registro DENTRO de la transacción
+    const orderId = await kraken.buy(...);
+    await pool.query(`INSERT...`, [...]);
+    
+    await pool.query("COMMIT");
+  } catch (error) {
+    await pool.query("ROLLBACK");
+    if (orderId) { // Solo cancelar si la orden existe
+      await kraken.cancelOrder(orderId); 
+    }
+  }
 
     // Validación de balance mejorada
     if (baseAmount > 10) {
