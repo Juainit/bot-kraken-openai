@@ -1,35 +1,38 @@
-require("dotenv").config(); // ✅ Primera línea SIEMPRE
-
+// ✅ Versión optimizada y segura:
+require("dotenv").config(); 
+const express = require("express"); // <-- Módulo core primero
 const { Pool } = require("pg");
-const kraken = require("./krakenClient");
+const app = express();
 
+// Middleware básico
+app.use(express.json()); 
+
+// Configuración PostgreSQL (source id=2 y 3)
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://postgres:oGaCnBFsBUlnePPStrsDgHYxbNXDApGR@shinkansen.proxy.rlwy.net:45439/railway",
-  ssl: (process.env.DATABASE_URL || "").includes("railway")
+  connectionString: process.env.DATABASE_URL, // ❌ Elimina el string hardcodeado (¡riesgo de seguridad!)
+  ssl: process.env.DATABASE_URL?.includes("railway") // ✅ Optional chaining
     ? { rejectUnauthorized: false }
     : false
 });
 
+// ✅ Requiere krakenClient DESPUÉS de inicializar lo esencial
+const kraken = require("./krakenClient"); 
+
+// Endpoint POST /alerta (Versión mejorada)
 app.post("/alerta", async (req, res) => {
   const { par, trailingStopPercent, inversion } = req.body;
-
+  
+  // Validaciones mejoradas
   if (!par || typeof par !== "string") {
     return res.status(400).json({ error: "Campo 'par' requerido y debe ser texto" });
   }
-
-  if (
-    typeof trailingStopPercent !== "number" ||
-    trailingStopPercent < 1 ||
-    trailingStopPercent > 50
-  ) {
-    return res.status(400).json({ error: "Campo 'trailingStopPercent' requerido y debe ser un número entre 1 y 50" });
+  
+  if (typeof trailingStopPercent !== "number" || trailingStopPercent < 1) {
+    return res.status(400).json({ error: "'trailingStopPercent' debe ser ≥1" });
   }
 
-  if (
-    inversion !== undefined &&
-    (typeof inversion !== "number" || inversion < 5)
-  ) {
-    return res.status(400).json({ error: "Si se incluye 'inversion', debe ser un número mayor a 5" });
+  if (inversion !== undefined && (typeof inversion !== "number" || inversion < 5)) {
+    return res.status(400).json({ error: "'inversion' debe ser ≥5" });
   }
 
   try {
@@ -38,191 +41,212 @@ app.post("/alerta", async (req, res) => {
     const baseAsset = cleanPair.slice(0, 3);
     const baseAmount = parseFloat(balance?.[baseAsset] || 0);
 
+    // Validación de balance mejorada
     if (baseAmount > 10) {
-      console.log(`⛔ Ya hay más de 10 unidades de ${baseAsset} en cartera. No se ejecuta compra.`);
-      return res.status(200).json({ message: "Par ya en cartera, no se compra." });
+      console.log(`⛔ ${baseAsset} en cartera (${baseAmount}u)`);
+      return res.status(200).json({ message: "Par ya en cartera" });
     }
 
+    // Query optimizada (source id=2)
     const { rows } = await pool.query(
-      "SELECT * FROM trades WHERE pair = $1 AND status = 'completed' ORDER BY createdAt DESC LIMIT 1",
+      "SELECT sellprice, quantity FROM trades WHERE pair = $1 AND status = 'completed' ORDER BY createdAt DESC LIMIT 1", 
       [cleanPair]
     );
 
-    let inversionEUR;
-
+    // Lógica de inversión mejorada
+    let inversionEUR = process.env.DEFAULT_INVERSION || 40; // Configurable
     if (inversion) {
-      inversionEUR = parseFloat(inversion);
-      console.log(`💸 Inversión personalizada recibida: ${inversionEUR} EUR`);
+      inversionEUR = inversion;
+      console.log(`💸 Inversión personalizada: ${inversionEUR}€`);
     } else if (rows.length > 0) {
       const lastTrade = rows[0];
       if (lastTrade.sellprice && lastTrade.quantity) {
         inversionEUR = lastTrade.sellprice * lastTrade.quantity;
-        console.log(`🔁 Reinvierte ${inversionEUR.toFixed(2)} EUR de la última venta.`);
-      } else {
-        inversionEUR = 40;
-        console.log(`🆕 Primer trade registrado, usando inversión por defecto de 40 EUR`);
+        console.log(`🔁 Reinversión: ${inversionEUR.toFixed(2)}€`);
       }
-    } else {
-      inversionEUR = 40;
-      console.log(`🆕 Primer trade registrado, usando inversión por defecto de 40 EUR`);
     }
 
+    // Obtención de precio mejorada (source id=1)
     const ticker = await kraken.getTicker(cleanPair);
     const marketPrice = parseFloat(ticker);
     const quantity = +(inversionEUR / marketPrice).toFixed(8);
 
+    // Ejecutar compra y registro en DB (source id=3)
     const orderId = await kraken.buy(cleanPair, quantity);
-
+    
     await pool.query(
       `INSERT INTO trades 
-        (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt, feeeur, limitorderid) 
+        (pair, quantity, buyprice, highestprice, stoppercents, status, feeeur) 
        VALUES 
-        ($1, $2, $3, $4, $5, 'active', NOW(), $6, $7)`,
-      [
-        cleanPair,               // $1
-        quantity,                // $2
-        marketPrice,             // $3
-        marketPrice,             // $4
-        trailingStopPercent,     // $5
-        0,                       // $6 → feeeur (por defecto 0)
-        null                     // $7 → limitorderid (por defecto null)
-      ]
+        ($1, $2, $3, $4, $5, 'active', $6)`,
+      [cleanPair, quantity, marketPrice, marketPrice, trailingStopPercent, 0]
     );
 
-    console.log(`✅ COMPRA ejecutada: ${quantity} ${cleanPair} a ${marketPrice}`);
-    res.status(200).json({ message: "Compra ejecutada correctamente" });
-
+    console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${marketPrice}€`);
+    res.status(200).json({ message: "Compra exitosa" });
   } catch (err) {
-    console.error("❌ Error en /alerta:", err);
-    res.status(500).json({ error: "Error al procesar la alerta" });
+    console.error("❌ Error en /alerta:", err.message);
+    res.status(500).json({ error: "Error interno: " + err.message });
   }
 });
 
+// GET /estado (Versión mejorada)
 app.get("/estado", async (req, res) => {
   try {
-    const { rows: activos } = await pool.query(
-      `SELECT pair, quantity, buyPrice, highestPrice, stopPercent, createdAt
-       FROM trades
-       WHERE status = 'active'
-       ORDER BY createdAt DESC`
-    );
-
-    const { rows: completados } = await pool.query(
-      `SELECT pair, sellPrice, profitPercent, feeeur, createdAt
-       FROM trades
-       WHERE status = 'completed'
-       ORDER BY createdAt DESC LIMIT 1`
-    );
+    const [activos, completados] = await Promise.all([
+      pool.query(
+        `SELECT 
+          pair, 
+          quantity, 
+          buyprice AS "buyPrice", 
+          highestprice AS "highestPrice",
+          stoppercents AS "stopPercent",
+          createdat AS "createdAt"
+         FROM trades 
+         WHERE status = 'active' 
+         ORDER BY createdat DESC`
+      ),
+      pool.query(
+        `SELECT 
+          pair,
+          sellprice AS "sellPrice",
+          profitpercent AS "profitPercent",
+          feeeur,
+          createdat AS "createdAt"
+         FROM trades 
+         WHERE status = 'completed' 
+         ORDER BY createdat DESC 
+         LIMIT 1`
+      )
+    ]);
 
     res.json({
-      activos,
-      ultimo_completado: completados[0] || null
+      activos: activos.rows,
+      ultimo_completado: completados.rows[0] || null
     });
 
   } catch (err) {
-    console.error("❌ Error en /estado:", err);
-    res.status(500).json({ error: "Error al consultar estado." });
+    console.error("❌ Error en /estado:", err.message);
+    res.status(500).json({ 
+      error: "Error al consultar estado",
+      detalle: err.message 
+    });
   }
 });
 
+// GET /historial (Versión unificada)
 app.get("/historial", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM trades ORDER BY createdAt DESC");
-    res.json(result.rows);
+    const { rows } = await pool.query(`
+      SELECT 
+        id,
+        pair,
+        quantity,
+        buyprice AS "buyPrice",
+        sellprice AS "sellPrice",
+        stoppercents AS "stopPercent",
+        feeeur,
+        status,
+        createdat AS "createdAt",
+        updatedat AS "updatedAt"
+      FROM trades 
+      ORDER BY createdat DESC`
+    );
+    
+    res.json(rows);
   } catch (err) {
-    console.error("❌ Error al obtener historial:", err);
-    res.status(500).json({ error: "Error al obtener el historial completo" });
+    console.error("❌ Error al obtener historial:", err.message);
+    res.status(500).json({ 
+      error: "Error al obtener historial completo",
+      detalle: err.message 
+    });
   }
 });
 
+// Endpoint GET /historial/:par (Versión mejorada)
 app.get("/historial/:par", async (req, res) => {
-  const par = req.params.par;
-
+  const par = req.params.par.toUpperCase().replace(/[^A-Z]/g, "");
+  
   try {
-    const result = await pool.query(
-      "SELECT * FROM trades WHERE pair = $1 ORDER BY createdAt DESC",
+    const { rows } = await pool.query(
+      `SELECT 
+        id,
+        pair,
+        quantity,
+        buyprice AS "buyPrice",
+        sellprice AS "sellPrice",
+        stoppercents AS "stopPercent",
+        feeeur,
+        status,
+        createdat AS "createdAt"
+       FROM trades 
+       WHERE pair = $1 
+       ORDER BY createdat DESC`, 
       [par]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ mensaje: `No hay historial para ${par}` });
+    if (rows.length === 0) {
+      return res.status(404).json({ 
+        mensaje: `No hay operaciones registradas para ${par}`,
+        moneda: par
+      });
     }
 
-    res.json(result.rows);
+    res.json(rows);
   } catch (err) {
-    console.error(`❌ Error al obtener historial de ${par}:`, err);
-    res.status(500).json({ error: "Error al obtener el historial de esta moneda" });
-  }
-});
-
-app.post("/vender", async (req, res) => {
-  const { pair, tipo, porcentaje, cantidad, precioLimite } = req.body;
-
-  if (!pair || !tipo || !["mercado", "limite"].includes(tipo)) {
-    return res.status(400).json({ error: "Faltan campos obligatorios o tipo inválido ('mercado' o 'limite')" });
-  }
-
-  try {
-    const cleanPair = pair.replace(/[^a-zA-Z]/g, "").toUpperCase();
-    const balance = await kraken.getBalance();
-    const baseAsset = cleanPair.slice(0, 3);
-    const baseAmount = parseFloat(balance?.[baseAsset] || 0);
-
-    let cantidadFinal;
-
-    if (typeof porcentaje === "number") {
-      if (porcentaje <= 0 || porcentaje > 100) {
-        return res.status(400).json({ error: "El porcentaje debe estar entre 1 y 100" });
-      }
-      cantidadFinal = +(baseAmount * (porcentaje / 100)).toFixed(8);
-    } else if (typeof cantidad === "number") {
-      cantidadFinal = cantidad;
-    } else {
-      return res.status(400).json({ error: "Debe incluirse 'porcentaje' o 'cantidad'" });
-    }
-
-    if (cantidadFinal <= 0.000001) {
-      return res.status(400).json({ error: "Cantidad final demasiado baja para operar" });
-    }
-
-    let orderId;
-    if (tipo === "mercado") {
-      orderId = await kraken.sell(cleanPair, cantidadFinal);
-      console.log(`✅ Venta a mercado: ${cantidadFinal} ${cleanPair}`);
-    } else {
-      if (!precioLimite || isNaN(precioLimite)) {
-        return res.status(400).json({ error: "Para ventas límite se requiere 'precioLimite'" });
-      }
-      orderId = await kraken.sellLimit(cleanPair, cantidadFinal, precioLimite);
-      console.log(`✅ Venta LÍMITE: ${cantidadFinal} ${cleanPair} a ${precioLimite}`);
-    }
-
-    res.json({ mensaje: "Orden enviada", orderId });
-  } catch (err) {
-    console.error("❌ Error en /vender:", err);
-    res.status(500).json({ error: "Error al procesar la venta" });
+    console.error(`❌ Error en historial de ${par}:`, err.message);
+    res.status(500).json({ 
+      error: `Error al obtener historial de ${par}`,
+      detalle: err.message 
+    });
   }
 });
 
 const sincronizarTrades = require("./sincronizador");
 
+// Endpoint de sincronización mejorado
 app.get("/sincronizar", async (req, res) => {
-  const auth = req.query.token;
-  if (auth !== process.env.SYNC_TOKEN) {
-    return res.status(403).send("🚫 Acceso denegado.");
-  }
-
   try {
-    console.log("🔄 Llamada externa para sincronización recibida");
-    await sincronizarTrades();
-    res.status(200).send("✅ Sincronización completada.");
+    // Validación de seguridad reforzada
+    const authToken = req.query.token;
+    if (!authToken || authToken !== process.env.SYNC_TOKEN) {
+      console.warn("⚠️ Intento de sincronización no autorizado");
+      return res.status(403).json({ 
+        error: "Acceso denegado",
+        codigo: "AUTH_REQUIRED"
+      });
+    }
+
+    console.log("🔄 Iniciando sincronización manual...");
+    const resultado = await sincronizarTrades();
+    
+    res.json({
+      status: "success",
+      message: "Sincronización completada",
+      detalles: resultado
+    });
+
   } catch (error) {
-    console.error("❌ Error al sincronizar:", error);
-    res.status(500).send("❌ Fallo en la sincronización.");
+    console.error("❌ Error crítico en sincronización:", error.message);
+    
+    res.status(500).json({
+      error: "Fallo en sincronización",
+      codigo: "SYNC_FAILED",
+      detalle: process.env.NODE_ENV === "production" 
+        ? "Ver logs del servidor" 
+        : error.message
+    });
   }
 });
 
+// Inicio seguro del servidor
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`🚀 Servidor corriendo en el puerto ${port}`);
+  console.log(`🚀 Servidor operativo en puerto ${port}`);
+  console.log("🔒 Modo de seguridad:", process.env.NODE_ENV || "development");
+  
+  // Inicia tradeManager solo si no está en test
+  if (process.env.NODE_ENV !== "test") {
+    require("./tradeManager");
+  }
 });

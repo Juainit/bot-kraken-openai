@@ -1,217 +1,185 @@
-require("dotenv").config(); // ✅ Carga primero las variables
-
+// ✅ Versión segura y optimizada
+require("dotenv").config();
 const { Pool } = require("pg");
-const kraken = require("./krakenClient");
 
+// Configuración de PostgreSQL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgresql://postgres:oGaCnBFsBUlnePPStrsDgHYxbNXDApGR@shinkansen.proxy.rlwy.net:45439/railway", // ✅ Fallback
-  ssl: (process.env.DATABASE_URL || "").includes("railway") // ✅ Protege contra undefined
-    ? { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("railway") 
+    ? { rejectUnauthorized: false } 
     : false
 });
 
-// Cache para precios
-const priceCache = {};
-const CACHE_DURATION = 60000; // 1 minuto
+const kraken = require("./krakenClient");
+
+// Sistema de caché
+const priceCache = new Map();
+const CACHE_DURATION = 60000;
+
+setInterval(() => {
+  const now = Date.now();
+  priceCache.forEach((value, key) => {
+    if (now - value.timestamp > CACHE_DURATION) priceCache.delete(key);
+  });
+}, 60000);
 
 async function getCachedPrice(pair) {
-  const now = Date.now();
-  if (priceCache[pair] && (now - priceCache[pair].timestamp) < CACHE_DURATION) {
-    return priceCache[pair].price;
+  try {
+    const now = Date.now();
+    if (priceCache.has(pair)) {
+      const cached = priceCache.get(pair);
+      if (now - cached.timestamp < CACHE_DURATION) return cached.price;
+    }
+    const price = await kraken.getTicker(pair);
+    if (price !== undefined) priceCache.set(pair, { price, timestamp: now });
+    return price;
+  } catch (error) {
+    console.error(`❌ Error al obtener precio de ${pair}:`, error.message);
+    return null;
   }
-  const price = await kraken.getTicker(pair);
-  if (price) {
-    priceCache[pair] = { price, timestamp: now };
+}
+
+async function retry(fn, intentos = 3, delay = 1000) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (intentos <= 1) throw err;
+    await new Promise(r => setTimeout(r, delay));
+    return retry(fn, intentos - 1, delay * 2);
   }
-  return price;
+}
+
+async function actualizarHighestPrice(tradeId, nuevaHighest) {
+  await pool.query(
+    "UPDATE trades SET highestprice = $1 WHERE id = $2",
+    [nuevaHighest, tradeId]
+  );
+}
+
+async function manejarVentaLimit(trade, stopPrice) {
+  try {
+    const orderId = await retry(() => 
+      kraken.sellLimit(trade.pair, trade.quantity, stopPrice), 
+      3
+    );
+    await pool.query(
+      "UPDATE trades SET limitorderid = $1 WHERE id = $2",
+      [orderId, trade.id]
+    );
+    console.log(`🧾 Orden límite colocada: ${trade.pair} @ ${stopPrice}`);
+  } catch (err) {
+    console.error(`❌ Falló límite ${trade.pair}:`, err.message);
+    await manejarVentaEmergencia(trade, await getCachedPrice(trade.pair));
+  }
+}
+
+async function manejarVentaEmergencia(trade, marketPrice) {
+  try {
+    if (trade.limitorderid) {
+      await kraken.cancelOrder(trade.limitorderid);
+      await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [trade.id]);
+    }
+    const orden = await retry(() => kraken.sell(trade.pair, trade.quantity), 3);
+    const txid = orden.result.txid[0];
+    const ejecucion = await verificarEjecucionOrden(txid);
+    await pool.query("BEGIN");
+    await pool.query(
+      `UPDATE trades 
+       SET status = 'completed', 
+           sellprice = $1, 
+           feeeur = $2,
+           profitpercent = ROUND((($1 - buyprice) / buyprice * 100)::numeric, 2)
+       WHERE id = $3`,
+      [ejecucion.price, ejecucion.fee, trade.id]
+    );
+    await pool.query("COMMIT");
+    console.log(`🚨 Venta EMERGENCIA: ${trade.quantity} ${trade.pair} @ ${ejecucion.price}`);
+  } catch (error) {
+    await pool.query("ROLLBACK");
+    console.error(`❌ Falló venta emergencia ${trade.pair}:`, error.message);
+    await pool.query("UPDATE trades SET status = 'failed' WHERE id = $1", [trade.id]);
+  }
+}
+
+async function verificarEjecucionOrden(txid, intentos = 5) {
+  for (let i = 0; i < intentos; i++) {
+    const estado = await kraken.checkOrderExecuted(txid);
+    if (estado?.status === 'closed') return estado;
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error("Orden no ejecutada después de múltiples intentos");
+}
+
+async function verificarDisponibilidadVenta(trade, balance) {
+  const baseAsset = trade.pair.replace(/[^A-Z]/g, "").slice(0, 3);
+  const balanceDisponible = parseFloat(balance[baseAsset] || 0);
+  if (balanceDisponible < trade.quantity * 0.9) {
+    console.warn(`⚠️ Bajo saldo en ${baseAsset}: ${balanceDisponible}`);
+    return false;
+  }
+  return true;
 }
 
 async function updateTrades() {
   try {
-    const { rows: tradesActivos } = await pool.query(
-      "SELECT * FROM trades WHERE status = 'active'"
+    const { rows: tradesActivos } = await pool.query(`
+      SELECT 
+        id, pair, quantity, buyprice, highestprice, 
+        stoppercent, limitorderid, createdat
+      FROM trades 
+      WHERE status = 'active'
+    `);
+    if (!tradesActivos.length) return console.log("⏭ No hay trades activos");
+
+    const precios = await Promise.allSettled(
+      tradesActivos.map(trade => getCachedPrice(trade.pair))
     );
-
-    if (tradesActivos.length === 0) {
-      console.log("⏭ No hay trades activos, omitiendo ciclo");
-      return;
-    }
-
-    const pricePromises = tradesActivos.map(trade => getCachedPrice(trade.pair));
-    const prices = await Promise.all(pricePromises);
-
-    // ✅ Solo UNA llamada a getBalance()
-    const balance = await kraken.getBalance();
+    const balance = await retry(() => kraken.getBalance(), 3);
     if (!balance || Object.keys(balance).length === 0) {
-      console.warn("⚠️ Kraken devolvió balance vacío. Se omite ciclo completo.");
-      return;
+      return console.warn("⚠️ Balance no disponible - Ciclo omitido");
     }
 
-    for (let i = 0; i < tradesActivos.length; i++) {
-      const trade = tradesActivos[i];
-      // ⏳ Espera de 2 minutos antes de evaluar trailing
-const creadoHaceMs = Date.now() - new Date(trade.createdat).getTime();
-if (creadoHaceMs < 120000) {
-  console.log(`⏳ Trade ${trade.pair} creado hace menos de 2 minutos. Se omite este ciclo.`);
-  continue;
-}
-      const marketPrice = prices[i];
+    for (const [i, trade] of tradesActivos.entries()) {
+      const { id, pair, createdat, limitorderid, quantity, buyprice } = trade;
+      if (Date.now() - new Date(createdat).getTime() < 120000) {
+        console.log(`⏳ ${pair}: Trade muy reciente`);
+        continue;
+      }
+      const marketPrice = precios[i]?.value;
       if (!marketPrice) {
-        console.warn(`⚠️ No se pudo obtener precio para ${trade.pair}, omitiendo`);
+        console.warn(`⚠️ ${pair}: Precio no disponible`);
         continue;
       }
 
-      const {
-        id,
-        pair,
-        quantity,
-        buyprice,
-        highestprice,
-        stoppercent,
-        limitorderid,
-      } = trade;
+      const nuevaHighest = Math.max(trade.highestprice, marketPrice);
+      const trailingValue = nuevaHighest * (trade.stoppercent / 100);
+      const stopPrice = nuevaHighest - trailingValue;
+      const limiteVenta = nuevaHighest - (trailingValue * 0.98);
+      const emergencia = stopPrice - (trailingValue * 0.02);
 
-        // Revisar si hay una orden LIMIT cerrada (ejecutada)
-  if (limitorderid) {
-    const ejecucion = await kraken.checkOrderExecuted(limitorderid);
-
-    if (ejecucion?.status === "closed") {
-      const { price: sellPrice, fee } = ejecucion;
-      const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
-
-      await pool.query(
-        `UPDATE trades 
-         SET status = 'completed', sellPrice = $1, feeeur = $2, profitPercent = $3, limitorderid = NULL 
-         WHERE id = $4`,
-        [sellPrice, fee, profitPercent, id]
-      );
-
-      console.log(`✅ Trade cerrado por ejecución de LIMIT: ${pair} a ${sellPrice}`);
-      continue; // Ya no hay que procesar más este trade
-    }
-  }
-
-      const nuevaHighest = Math.max(highestprice, marketPrice);
-      const stopPrice = parseFloat((nuevaHighest * (1 - stoppercent / 100)).toFixed(6));
-
-      if (nuevaHighest > highestprice) {
-        await pool.query("UPDATE trades SET highestPrice = $1 WHERE id = $2", [
-          nuevaHighest,
-          id,
-        ]);
+      if (nuevaHighest > trade.highestprice) {
+        await actualizarHighestPrice(trade.id, nuevaHighest);
         if (limitorderid) {
           await kraken.cancelOrder(limitorderid);
-          await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [id]);
-          console.log(`❌ Orden LIMIT cancelada antes de venta de emergencia: ${pair}`);
-        
-          // 🕐 Esperamos a que Kraken libere el saldo reservado
-          console.log(`⏳ Esperando liberación de saldo para ${pair}...`);
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [trade.id]);
+          console.log(`🛑 Orden cancelada: ${pair}`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
 
-      console.log(`\n📈 Precio actual de ${pair}: ${marketPrice}`);
-
-      const baseAsset = pair.replace(/(USD|EUR)$/, "");
-      const balanceDisponible = parseFloat(balance?.[baseAsset] || 0);
-      const cantidadVendible = Math.min(balanceDisponible, quantity);
-
-      
-      if (cantidadVendible < 0.00001) {
-        console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`);
-
-        if (limitorderid) {
-          const ejecucion = await kraken.checkOrderExecuted(limitorderid);
-
-          if (ejecucion?.status === "closed") {
-            const { price: sellPrice, fee } = ejecucion;
-            const profitPercent = ((sellPrice - buyprice) / buyprice) * 100;
-
-            await pool.query(
-              `UPDATE trades 
-               SET status = 'completed', sellPrice = $1, feeeur = $2, profitPercent = $3, limitorderid = NULL 
-               WHERE id = $4`,
-              [sellPrice, fee, profitPercent, id]
-            );
-
-            console.log(`✅ Trade cerrado por ejecución de LIMIT (sin saldo): ${pair} a ${sellPrice}`);
-          } else {
-            console.log(`⏸ Orden LIMIT aún activa pero sin saldo: ${pair}`);
-          }
-        } else {
-          await pool.query(
-            `UPDATE trades SET status = 'cancelled' WHERE id = $1`,
-            [id]
-          );
-          console.log(`🚫 Trade cancelado automáticamente por saldo 0 sin LIMIT: ${pair}`);
-        }
-
-        continue;
+      if (marketPrice <= limiteVenta) {
+        await manejarVentaLimit(trade, stopPrice);
+      } else if (marketPrice <= emergencia) {
+        await manejarVentaEmergencia(trade, marketPrice);
       }
 
-if (marketPrice < stopPrice) {
-  console.log(`🛑 Activado STOP para ${pair}`);
-  
-  // 1. Cancelar orden límite si existe
-  if (limitorderid) {
-    await kraken.cancelOrder(limitorderid);
-    await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [id]);
-    console.log(`❌ Orden LIMIT cancelada antes de venta de emergencia: ${pair}`);
-    await new Promise(resolve => setTimeout(resolve, 1000)); // Esperar liberación de saldo
-  }
-
-  // 2. Validar cantidad vendible
-  if (cantidadVendible < 0.00001) {
-    console.warn(`⚠️ Cantidad insuficiente de ${baseAsset} para vender ${pair}. Disponible: ${balanceDisponible}`);
-    continue;
-  }
-
-  // 🚀 3. VALIDACIÓN NUMÉRICA Y SEGURIDAD AÑADIDA
-  const numericMarketPrice = parseFloat(marketPrice);
-  if (isNaN(numericMarketPrice)) {
-    console.error(`❌ Precio de mercado inválido para ${pair}: ${marketPrice}`);
-    continue;
-  }
-
-  // 4. Ejecutar venta en Kraken
-  const orden = await kraken.sell(pair, cantidadVendible);
-  if (!orden) {
-    console.error(`❌ No se pudo vender ${pair}`);
-    continue;
-  }
-
-  // 5. Verificar ejecución
-  const txid = orden.result.txid[0];
-  const ejecucion = await kraken.checkOrderExecuted(txid);
-  if (!ejecucion || ejecucion.status !== "closed") {
-    console.warn(`⏳ Venta no ejecutada aún para ${pair}`);
-    continue;
-  }
-
-  // 🚀 6. ACTUALIZACIÓN SEGURA DE LA DB
-  const { price: sellPrice, fee } = ejecucion;
-  const numericSellPrice = parseFloat(sellPrice);
-  const numericFee = parseFloat(fee);
-
-  await pool.query(
-    `UPDATE trades 
-     SET status = 'completed', 
-         sellPrice = $1, 
-         feeeur = $2, 
-         profitPercent = (($1 - buyprice) / buyprice) * 100
-     WHERE id = $3`,
-    [numericSellPrice, numericFee, id]  // 🚀 Parámetros preparados
-  );
-  console.log(`✅ VENTA ejecutada: ${cantidadVendible} ${pair} a ${numericSellPrice}`);
-
-} else if (!limitorderid) {
-  // ... (mantener lógica existente de órdenes límite)
-}
+      const puedeVender = await verificarDisponibilidadVenta(trade, balance);
+      if (!puedeVender) console.warn(`⏸️ No se puede vender ${pair} por saldo insuficiente`);
     }
   } catch (err) {
-    console.error("❌ Error en updateTrades:", err);
+    console.error("❌ Error crítico en updateTrades:", err.message);
   }
 }
 
-// ✅ Ejecutar cada 5 minutos
-setInterval(updateTrades, 300000);
+// Ejecutar cada 3 minutos
+setInterval(updateTrades, 180000);
