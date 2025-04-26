@@ -81,7 +81,7 @@ if (creadoHaceMs < 120000) {
 
       await pool.query(
         `UPDATE trades 
-         SET status = 'completed', sellPrice = $1, feeEUR = $2, profitPercent = $3, limitorderid = NULL 
+         SET status = 'completed', sellPrice = $1, feeeur = $2, profitPercent = $3, limitorderid = NULL 
          WHERE id = $4`,
         [sellPrice, fee, profitPercent, id]
       );
@@ -129,7 +129,7 @@ if (creadoHaceMs < 120000) {
 
             await pool.query(
               `UPDATE trades 
-               SET status = 'completed', sellPrice = $1, feeEUR = $2, profitPercent = $3, limitorderid = NULL 
+               SET status = 'completed', sellPrice = $1, feeeur = $2, profitPercent = $3, limitorderid = NULL 
                WHERE id = $4`,
               [sellPrice, fee, profitPercent, id]
             );
@@ -197,7 +197,7 @@ if (marketPrice < stopPrice) {
     `UPDATE trades 
      SET status = 'completed', 
          sellPrice = $1, 
-         "feeEUR" = $2, 
+         feeeur = $2, 
          profitPercent = (($1 - buyprice) / buyprice) * 100
      WHERE id = $3`,
     [numericSellPrice, numericFee, id]  // 🚀 Parámetros preparados

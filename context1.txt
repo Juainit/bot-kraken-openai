@@ -1,6 +1,4 @@
-= Manual del Bot de Trading Automatizado con Kraken y TradingView
-:sectnums:
-:toc:
+Manual del Bot de Trading Automatizado con Kraken y TradingView
 
 == 1. Objetivo del Proyecto
 
@@ -117,6 +115,8 @@ Validaciones implementadas en server.js:
 "par": debe estar presente y ser string
 
 = Manual del Bot Kraken OpenAI
+
+EL SYNC_TOKEN de la Base da datps postgres es: mi-token-super-secreto
 
 
 == 1. Objetivo General

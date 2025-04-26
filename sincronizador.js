@@ -30,7 +30,7 @@ module.exports = async function sincronizarTrades() {
 
         await pool.query(
           `UPDATE trades 
-           SET status = 'completed', sellPrice = $1, feeEUR = $2, profitPercent = $3 
+           SET status = 'completed', sellPrice = $1, feeeur = $2, profitPercent = $3 
            WHERE id = $4`,
           [sellPrice, fee, profitPercent, trade.id]
         );
@@ -61,7 +61,7 @@ module.exports = async function sincronizarTrades() {
 
       await pool.query(
         `INSERT INTO trades 
-        (pair, quantity, buyprice, highestprice, stoppercent, status, createdat, "feeEUR", limitorderid)
+        (pair, quantity, buyprice, highestprice, stoppercent, status, createdat, feeeur, limitorderid)
         VALUES ($1, $2, $3, $3, 4, 'active', $4, $5, NULL)`,
         [pair, quantity, buyPrice, createdAt, fee]
       );
@@ -74,7 +74,7 @@ module.exports = async function sincronizarTrades() {
     const closedHistoryOrders = krakenTradesHistory.result.trades || {};
 
     const { rows: tradesWithoutFee } = await pool.query(
-      "SELECT id, pair FROM trades WHERE feeEUR IS NULL OR feeEUR = 0"
+      "SELECT id, pair FROM trades WHERE feeeur IS NULL OR feeeur = 0"
     );
 
     for (const trade of closedHistoryOrders) {
@@ -84,7 +84,7 @@ module.exports = async function sincronizarTrades() {
       for (const tradeWithoutFee of tradesWithoutFee) {
         if (tradeWithoutFee.pair === cleanPair) {
           await pool.query(
-            `UPDATE trades SET "feeEUR" = $1 WHERE id = $2`,
+            `UPDATE trades SET feeeur = $1 WHERE id = $2`,
             [fee, tradeWithoutFee.id]
           );
           console.log(`➕ Fee actualizado para ${cleanPair}: ${fee}`);

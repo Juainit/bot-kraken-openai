@@ -1,17 +1,13 @@
-require("dotenv").config();
-const express = require("express");
-const bodyParser = require("body-parser");
+require("dotenv").config(); // ✅ Primera línea SIEMPRE
+
 const { Pool } = require("pg");
 const kraken = require("./krakenClient");
 
-const app = express();
-app.use(bodyParser.json());
-
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes("railway")
+  connectionString: process.env.DATABASE_URL || "postgresql://postgres:oGaCnBFsBUlnePPStrsDgHYxbNXDApGR@shinkansen.proxy.rlwy.net:45439/railway",
+  ssl: (process.env.DATABASE_URL || "").includes("railway")
     ? { rejectUnauthorized: false }
-    : false,
+    : false
 });
 
 app.post("/alerta", async (req, res) => {
@@ -79,7 +75,7 @@ app.post("/alerta", async (req, res) => {
 
     await pool.query(
       `INSERT INTO trades 
-        (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt, feeEUR, limitorderid) 
+        (pair, quantity, buyPrice, highestPrice, stopPercent, status, createdAt, feeeur, limitorderid) 
        VALUES 
         ($1, $2, $3, $4, $5, 'active', NOW(), $6, $7)`,
       [
@@ -88,7 +84,7 @@ app.post("/alerta", async (req, res) => {
         marketPrice,             // $3
         marketPrice,             // $4
         trailingStopPercent,     // $5
-        0,                       // $6 → feeEUR (por defecto 0)
+        0,                       // $6 → feeeur (por defecto 0)
         null                     // $7 → limitorderid (por defecto null)
       ]
     );
@@ -112,7 +108,7 @@ app.get("/estado", async (req, res) => {
     );
 
     const { rows: completados } = await pool.query(
-      `SELECT pair, sellPrice, profitPercent, feeEUR, createdAt
+      `SELECT pair, sellPrice, profitPercent, feeeur, createdAt
        FROM trades
        WHERE status = 'completed'
        ORDER BY createdAt DESC LIMIT 1`
