@@ -22,11 +22,22 @@ const kraken = require("./krakenClient");
 app.post("/alerta", async (req, res) => {
   let orderId; // <-- Declarar fuera del try
   try {
-    // ...
-    orderId = await kraken.buy(...);
+    // ... (validaciones previas)
+    const { par, trailingStopPercent, inversion } = req.body;
+    const cleanPair = par.replace(/[^A-Z]/g, "").toUpperCase();
+    const marketPrice = await kraken.getTicker(cleanPair);
+    const quantity = inversion / marketPrice;
+
+    // ✅ Versión corregida (parámetros reales)
+    orderId = await kraken.buy(cleanPair, quantity); // <-- ¡Aquí está el fix!
+
   } catch (error) {
-    if (orderId) { ... } // ✅ Ahora es accesible
+    if (orderId) { 
+      await kraken.cancelOrder(orderId); 
+    }
+    // ... (manejo de errores)
   }
+});
   
   // Validaciones mejoradas
   if (!par || typeof par !== "string") {
