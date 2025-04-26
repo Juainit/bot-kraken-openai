@@ -17,6 +17,30 @@ SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
+DROP DATABASE railway;
+--
+-- Name: railway; Type: DATABASE; Schema: -; Owner: postgres
+--
+
+CREATE DATABASE railway WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = libc LOCALE = 'en_US.utf8';
+
+
+ALTER DATABASE railway OWNER TO postgres;
+
+\connect railway
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -32,11 +56,11 @@ CREATE TABLE public.trades (
     buyprice numeric NOT NULL,
     stoppercent numeric NOT NULL,
     highestprice numeric NOT NULL,
-    sellprice text,
+    sellprice numeric,
     status text NOT NULL,
     profitpercent numeric,
     createdat timestamp without time zone DEFAULT now(),
-    feeeur real,
+    "feeEUR" numeric,
     limitorderid text
 );
 
@@ -76,7 +100,7 @@ ALTER TABLE ONLY public.trades ALTER COLUMN id SET DEFAULT nextval('public.trade
 -- Data for Name: trades; Type: TABLE DATA; Schema: public; Owner: postgres
 --
 
-COPY public.trades (id, pair, quantity, buyprice, stoppercent, highestprice, sellprice, status, profitpercent, createdat, feeeur, limitorderid) FROM stdin;
+COPY public.trades (id, pair, quantity, buyprice, stoppercent, highestprice, sellprice, status, profitpercent, createdat, "feeEUR", limitorderid) FROM stdin;
 3	ACHEUR	1295.89632829	0.02315	8	0.02603	0.02417	completed	4.41	2025-04-20 22:18:31.906745	0.12534	\N
 9	ACXUSD	193.23671498	0.207	6	0.2138	0.2047	completed	-1.11111111111111111100	2025-04-21 06:01:01.099259	0	\N
 20	ZROEUR	17.81737194	2.245	4	2.313	2.295	completed	2.22717149220489977700	2025-04-22 15:01:01.033457	0	\N
@@ -91,16 +115,15 @@ COPY public.trades (id, pair, quantity, buyprice, stoppercent, highestprice, sel
 27	RSREUR	5000	0.008	4	0.008073	0.00775	completed	-3.1250000000000027	2025-04-23 00:23:24.285296	0.09688	\N
 43	STXEUR	53.61211634	0.7461	5	0.7474	\N	cancelled	\N	2025-04-24 15:01:00.785293	0	\N
 44	XCNEUR	2055.49845838	0.01946	6	0.01946	\N	cancelled	\N	2025-04-24 15:01:01.485237	0	\N
-26	TRXUSD	161.35929066	0.247894	6	0.24939	\N	active	\N	2025-04-23 00:21:49.728106	\N	\N
-6	BEAMUSD	6211.18012422	0.00644	5	0.00678	0.00647	completed	0.4658385093167646	2025-04-21 03:00:01.289544	0.16099378	\N
-19	ACHEUR	1332.84315978	0.0235	6	0.02376	0.0237	completed	0.8510638297872288	2025-04-22 15:01:01.031476	0.1264068	\N
-34	ZROEUR	16.95309644	2.412	4	2.462	2.363	completed	-2.031509121061357	2025-04-23 21:01:03.085474	0.1603084	\N
+6	BEAMUSD	6211.18012422	0.00644	5	0.00678	0.00647	completed	0.4658385093167646	2025-04-21 03:00:01.289544	0.160994	\N
+19	ACHEUR	1332.84315978	0.0235	6	0.02376	0.0237	completed	0.8510638297872288	2025-04-22 15:01:01.031476	0.126407	\N
+34	ZROEUR	16.95309644	2.412	4	2.462	2.363	completed	-2.031509121061357	2025-04-23 21:01:03.085474	0.160308	\N
 35	SYNUSD	149.47683109	0.2676	10	0.311	\N	cancelled	\N	2025-04-24 03:00:26.948213	0	\N
 11	USUALUSD	295.85798817	0.1352	12	0.1379	0.1365	completed	0.961538461538479	2025-04-22 00:01:04.153906	0.16047	\N
 41	ICXEUR	434.31053203	0.0921	6	0.0921	\N	cancelled	\N	2025-04-24 15:01:00.12934	0	\N
-24	CLVUSD	1529.63671128	0.02615	6	0.02652	0.02626	completed	0.4206500956022906	2025-04-22 18:01:01.09276	0.16073422	\N
-36	IDEXUSD	1515.15151515	0.0264	6	0.02743	\N	active	\N	2025-04-24 06:01:01.091423	0	\N
+24	CLVUSD	1529.63671128	0.02615	6	0.02652	0.02626	completed	0.4206500956022906	2025-04-22 18:01:01.09276	0.160734	\N
 33	CLVUSD	1468.67495569	0.02735	6	0.02769	\N	cancelled	\N	2025-04-23 18:01:01.412101	0	\N
+45	SYNUSD	138.2648	0.2553	4	0.311	\N	cancelled	\N	2025-04-24 23:08:30.053368	0	\N
 30	SCRTUSD	176.2791425	0.2251	3	0.2301	\N	cancelled	\N	2025-04-23 09:01:02.174778	0	\N
 5	SYNUSD	239.80815348	0.1668	10	0.2397	\N	cancelled	\N	2025-04-21 00:39:57.352361	\N	\N
 16	MKRUSD	0.02885586	1386.2	6	1461.6	\N	cancelled	\N	2025-04-22 09:01:01.405512	\N	\N
@@ -110,16 +133,20 @@ COPY public.trades (id, pair, quantity, buyprice, stoppercent, highestprice, sel
 31	AUDIOUSD	498.75311721	0.0802	4	0.0802	0.0767	completed	-4.364089775561085	2025-04-23 10:04:27.922551	0.153217	\N
 32	ENJEUR	504.41361917	0.0793	6	0.0815	0.0765	completed	-3.530895334174019	2025-04-23 12:00:41.870852	0.15455	\N
 10	ZROUSD	15.43805481	2.591	3	2.65	\N	cancelled	\N	2025-04-21 08:37:52.602854	\N	\N
-42	SCRTUSD	180.52973147	0.2198	3	0.2205	\N	active	\N	2025-04-24 15:01:00.469	0	\N
+46	WLDUSD	45.045	0.7818	4	1.198	\N	active	\N	2025-04-24 23:17:25.014917	0	\N
 15	SYNUSD	190.11406844	0.2104	10	0.2318	\N	cancelled	\N	2025-04-22 03:01:00.90456	\N	\N
 13	STXEUR	60.53268765	0.6608	5	0.693	\N	cancelled	\N	2025-04-22 03:00:03.408018	\N	\N
-39	FETEUR	64.93506494	0.616	6	0.6283	\N	active	\N	2025-04-24 15:00:24.30087	0	\N
-29	ADXUSD	419.02367484	0.09546	6	0.09624	\N	active	\N	2025-04-23 09:01:01.19243	0	\N
-37	CRVUSD	59.25925926	0.675	8	0.705	\N	active	\N	2025-04-24 09:01:02.088059	0	\N
-40	ALGOUSD	181.200453	0.22075	3	0.2255	\N	active	\N	2025-04-24 15:00:32.186194	0	\N
-38	ENJEUR	492.81790379	0.0783	7	0.0815	\N	active	\N	2025-04-24 09:01:02.642411	0	\N
 14	MEWUSD	15860.42823156	0.002522	6	0.002752	\N	cancelled	\N	2025-04-22 03:00:24.731566	\N	\N
 4	MEWUSD	16597.51037344	0.00241	6	0.002752	\N	cancelled	\N	2025-04-21 00:00:46.347165	\N	\N
+29	ADXUSD	419.02367484	0.09546	6	0.10184	\N	active	\N	2025-04-23 09:01:01.19243	0	\N
+42	SCRTUSD	180.52973147	0.2198	3	0.228	\N	cancelled	\N	2025-04-24 15:01:00.469	0	\N
+36	IDEXUSD	1515.15151515	0.0264	6	0.02868	\N	cancelled	\N	2025-04-24 06:01:01.091423	0	\N
+47	BCHUSD	0.33237314	361.0267	4	384.27	\N	cancelled	\N	2025-04-25 08:00:00	0	\N
+38	ENJEUR	492.81790379	0.0783	7	0.083	\N	active	\N	2025-04-24 09:01:02.642411	0	\N
+37	CRVUSD	59.25925926	0.675	8	0.709	\N	active	\N	2025-04-24 09:01:02.088059	0	\N
+40	ALGOUSD	181.200453	0.22075	3	0.23847	\N	active	\N	2025-04-24 15:00:32.186194	0	OI3JNZ-NYH6K-CL6XUM
+26	TRXUSD	161.35929066	0.247894	6	0.249914	\N	active	\N	2025-04-23 00:21:49.728106	\N	\N
+39	FETEUR	64.93506494	0.616	6	0.7057	\N	active	\N	2025-04-24 15:00:24.30087	0	OUZV3W-NVHK7-PC35DA
 \.
 
 
@@ -127,7 +154,7 @@ COPY public.trades (id, pair, quantity, buyprice, stoppercent, highestprice, sel
 -- Name: trades_id_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
 --
 
-SELECT pg_catalog.setval('public.trades_id_seq', 44, true);
+SELECT pg_catalog.setval('public.trades_id_seq', 47, true);
 
 
 --

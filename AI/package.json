@@ -1,0 +1,23 @@
+{
+  "name": "ai",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "deepseek_api.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node --no-warnings deepseek_test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Conexión con API de DeepSeek para generación de código",
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.2",
+    "node-fetch-native": "^1.6.6"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

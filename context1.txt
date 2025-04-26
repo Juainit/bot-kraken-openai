@@ -20,7 +20,7 @@ GET /historial/:par: operaciones históricas filtradas por par
 === 2.2 tradeManager.js
 Proceso que monitorea continuamente los trades activos. Aplica trailing stop y ejecuta ventas automáticas:
 
-Coloca orden LIMIT si cae al 80 % del trailing stop, crea el límit por el valor del límite inferior del trailing El stopPrice. (O sea, si
+Coloca orden LIMIT si cae al 95 % del trailing stop, crea el límit por el valor del límite inferior del trailing El stopPrice. (O sea, si
 
 Ejecuta venta a mercado si sigue cayendo después del la orden de venta límit (por si no se ha ejecutado). Para ello deberá cancelar la orden limit y después vender a mercado.
 
@@ -29,7 +29,7 @@ Por cierto, cancela la orden LIMIT si el precio se recupera y
 Detecta ejecuciones completas y registra el fee
 
 === 2.3 venderManual.js
-Permite forzar manualmente la venta de una operación activa específica, ejecutando una orden a mercado del 100% de la cantidad.
+Permite forzar manualmente la venta de una operación activa específica, ejecutando una orden a límite del 100% de la cantidad.
 
 == 3. Lógica de Inversión
 
@@ -98,22 +98,6 @@ curl https://bot-kraken-openai-production.up.railway.app/historial
 [source,bash]
 curl https://bot-kraken-openai-production.up.railway.app/historial/ADAEUR
 
-== 7. Archivos Clave
-
-server.js → compra, validación, API REST y endpoints auxiliares
-
-tradeManager.js → trailing stop, ventas automáticas, fees
-
-venderManual.js → salida manual
-
-krakenClient.js → interfaz segura con API de Kraken
-
-package.json → dependencias
-
-railway.json → configuración para Railway
-
-.env → claves privadas de Kraken y URL de PostgreSQL
-
 == 8. GitHub y Railway
 
 === GitHub
@@ -133,8 +117,7 @@ Validaciones implementadas en server.js:
 "par": debe estar presente y ser string
 
 = Manual del Bot Kraken OpenAI
-:toc:
-:sectnums:
+
 
 == 1. Objetivo General
 
@@ -156,7 +139,7 @@ URL: https://bot-kraken-openai-production.up.railway.app
 
 Base de datos PostgreSQL gestionada por Railway.
 
-Variables de entorno:
+Variables de entorno: Enstán en railway y en .env
 
 API_KEY, API_SECRET: credenciales Kraken.
 
@@ -186,116 +169,22 @@ package.json: dependencias y configuración del proyecto Node.js.
 
 start.sh: script de inicio para lanzar ambos procesos (server.js y tradeManager.js).
 
-== 4. Endpoints y Webhooks
-
-=== POST /alerta
-Recibe alertas como:
-
-{
-  "par": "LAYERUSD",
-  "trailingStopPercent": 6
-}
-
-Realiza compra automática e inicia seguimiento con trailing stop.
-
-=== GET /estado
-Devuelve operaciones activas y la última completada.
-
-=== GET /historial
-Devuelve todo el historial de transacciones.
-
-=== GET /historial/:par
-Devuelve historial filtrado por par (ej. /historial/TAOUSD).
-
-=== POST /vender
-Permite venta manual:
-
-{
-  "pair": "TAOUSD",
-  "tipo": "mercado", // o "limite"
-  "porcentaje": 50,
-  "precioLimite": 320 // solo si tipo = limite
-}
-
 == 5. Lógica del Bot (tradeManager.js)
 
 Revisa operaciones activas cada minuto y aplica esta estrategia:
 
 Si el precio sube, actualiza highestPrice y cancela orden limitada.
 
-Si baja un 75% del trailing, coloca venta limitada al precio del 100% del trailing.
+Si baja un 95% del trailing, coloca venta limitada al precio del 100% del trailing.
 
 Si luego sube, cancela esa orden.
 
-Si baja un 20% más desde el stopPrice, ejecuta venta de emergencia a mercado.
+Si baja un 10% más desde el stopPrice, ejecuta venta de emergencia a mercado.
 
 Se calculan y registran beneficios y comisiones (feeEUR), incluso para emergencias.
 
 == 6. Scripts Manuales (macOS)
 
-Están en /Scripts/, se ejecutan con doble clic. Incluyen:
-
-comprar.command: compra una moneda especificando par, trailing, e inversión.
-
-vender.command: venta rápida a mercado.
-
-vender_avanzado.command: permite elegir venta a mercado o límite, cantidad y precio.
-
-estado.command: muestra operaciones activas y última venta.
-
-historial.command: muestra historial completo.
-
-historial_moneda.command: historial filtrado por par.
-
-manual.command: selector para todas las acciones anteriores.
-
-== 7. Base de Datos (PostgreSQL)
-
-Tabla: trades
-
-CREATE TABLE trades (
-  id SERIAL PRIMARY KEY,
-  pair TEXT NOT NULL,
-  quantity NUMERIC NOT NULL,
-  buyPrice NUMERIC NOT NULL,
-  highestPrice NUMERIC NOT NULL,
-  stopPercent NUMERIC NOT NULL,
-  sellPrice NUMERIC,
-  status TEXT NOT NULL,
-  profitPercent NUMERIC,
-  feeEUR NUMERIC,
-  createdAt TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-== 8. Deployment
-
-git add .
-git commit -m "feat: actualizar lógica de trailing y venta manual"
-git push # railway despliega
-
-== 9. Utilidades Locales
-
-brew install libpq
-
-psql "<DATABASE_PUBLIC_URL>" -c "ALTER TABLE trades ALTER COLUMN feeEUR DROP NOT NULL;"
-
-== 10. Errores Comunes y Solución
-
-❌ kraken.api is not a function → revisar krakenClient.js y exportaciones.
-
-❌ getaddrinfo ENOTFOUND postgres.railway.internal → intentar ejecutar desde fuera de Railway.
-
-❌ Venta no aparece → revisar que se actualiza la base de datos tras vender.
-
-== 11. Próximos pasos
-
-Exportar todo el historial a CSV.
-
-Notificaciones por Telegram tras cada operación.
-
-Análisis visual de beneficios desde dashboard.
-
-== 12. Contacto y Mantenimiento
 
 Mantenedor: Joan Subirachs
 
@@ -310,9 +199,9 @@ Consideraciones del asistente, obligaciones:
 
 1. Los conocimientos de programación son muy limitados de la persona a la que se dirige el asistente. El asistente debe mostrar los pasos 1 por 1, nunca mas de una secuencia de más de dos pasos.
 2. Nunca debe dar por supuesto la persona sabe que un comando debe ponerlo en Terminal o en un archivo de visual studio code, el asistente debe decirlo antes siempre; por ejemplo: “abre terminal y copia esto:” ,o, “En Visual Studo Code, abre el archivo server.js y copia este codigo:”.
-3. El asistente nunca debe mostrar las modificaciones de codigo aisladas, en otras palabras, el asistente siempre debe mostrar el codigo listo y entero para que la persona lo copie entero y lo pegue entero. O sea, nunca sugerencias como: “cambia esta parte del código de server.js por esta otra”. Siempre se debe poner todo el codigo desde la primera hasta la última linea del archivo, para que el individuo lo pueda pegar todo entero.
-4. Se dispone de Terminal, Visual Studio Code, Github, Railway, Tradingview.
-5. Envíame los pasos como texto continuo, no como lista numerada. Hazlo todo en texto plano, sin listas numeradas tipo markdown. Usa comentarios cuando sea necesario. No uses funciones avanzadas ni herramientas adicionales como File Search o Code Interpreter. Solo explícame cómo hacerlo directamente desde mi Mac en local. 
+3. El asistente nunca debe mostrar las modificaciones de codigo aisladas, en otras palabras, el asistente siempre debe mostrar el codigo listo y entero para que la persona lo copie entero y lo pegue entero. Siempre se debe proporcionar el bloque de código entero para copiar, no solo una línea. Si es solo una línea, crear todo el bloque. 
+4. Se dispone de Terminal, Visual Studio Code, Github, Railway, Tradingview. Docker Desktop.
+5. Envíame los pasos como texto continuo, no como lista numerada. Hazlo todo en texto plano, sin listas numeradas tipo markdown. 
 6. Uso la carpeta `bot-kraken-openai` en mi escritorio.
 
 
