@@ -1,88 +1,108 @@
 // ✅ Versión optimizada y segura:
 require("dotenv").config(); 
-const express = require("express"); // <-- Módulo core primero
+const express = require("express");
 const { Pool } = require("pg");
 const app = express();
 
-// Middleware básico
-app.use(express.json()); 
-
-// Configuración PostgreSQL (source id=2 y 3)
+// Configuración básica
+app.use(express.json());
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL, // ❌ Elimina el string hardcodeado (¡riesgo de seguridad!)
-  ssl: process.env.DATABASE_URL?.includes("railway") // ✅ Optional chaining
-    ? { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("railway") 
+    ? { rejectUnauthorized: false } 
     : false
 });
 
-// ✅ Requiere krakenClient DESPUÉS de inicializar lo esencial
-const kraken = require("./krakenClient"); 
+const kraken = require("./krakenClient");
 
-// Endpoint POST /alerta (Versión mejorada)
-// ✅ Versión corregida y unificada:
+// Endpoint POST /alerta - Versión mejorada
 app.post("/alerta", async (req, res) => {
   let orderId;
   const { par, trailingStopPercent, inversion } = req.body;
 
-  // Validaciones iniciales (sincrónicas)
-  if (!par || typeof par !== "string") {
-    return res.status(400).json({ error: "Campo 'par' requerido y debe ser texto" });
-  }
-  if (typeof trailingStopPercent !== "number" || trailingStopPercent < 1) {
-    return res.status(400).json({ error: "'trailingStopPercent' debe ser ≥1" });
-  }
-  if (inversion !== undefined && (typeof inversion !== "number" || inversion < 5)) {
-    return res.status(400).json({ error: "'inversion' debe ser ≥5" });
-  }
-
   try {
-    await pool.query("BEGIN");
-
-    // 1. Validar si el par ya está en cartera
-    const cleanPair = par.replace(/[^A-Z]/g, "").toUpperCase();
-    const { rows: existing } = await pool.query(
-      "SELECT quantity FROM trades WHERE pair = $1 AND status = 'active'",
-      [cleanPair]
-    );
-    if (existing.length > 0) {
-      await pool.query("ROLLBACK");
-      return res.status(400).json({ error: "Par ya en cartera" });
+    // Validaciones básicas
+    if (!par || typeof par !== "string") {
+      return res.status(400).json({ error: "Par requerido y debe ser texto" });
+    }
+    if (typeof trailingStopPercent !== "number" || trailingStopPercent < 1) {
+      return res.status(400).json({ error: "Trailing stop debe ser ≥1%" });
     }
 
-    // 2. Calcular inversión
+    await pool.query("BEGIN");
+    const cleanPair = par.replace(/[^A-Z]/g, "").toUpperCase();
+
+    // Verificar operaciones existentes
+    const { rows: existing } = await pool.query(
+      "SELECT 1 FROM trades WHERE pair = $1 AND status = 'active'",
+      [cleanPair]
+    );
+    
+    if (existing.length > 0) {
+      await pool.query("ROLLBACK");
+      return res.status(400).json({ error: "Operación activa existente" });
+    }
+
+    // Lógica de inversión dinámica
     let inversionEUR = process.env.DEFAULT_INVERSION || 40;
-    // ... (lógica de reinversión)
+    if (process.env.REINVERSION === 'true') {
+      const balance = await kraken.getAvailableBalance();
+      inversionEUR = Math.max(balance, 40);
+    }
 
-    // 3. Obtener precio y cantidad
+    // Obtener metadata del par
+    const { decimales } = await kraken.validarPar(cleanPair);
+    if (!decimales) {
+      await pool.query("ROLLBACK");
+      return res.status(400).json({ error: "Par no válido" });
+    }
+
+    // Ejecutar compra
     const ticker = await kraken.getTicker(cleanPair);
-    const marketPrice = parseFloat(ticker);
-    const quantity = +(inversionEUR / marketPrice).toFixed(8);
-
-    // 4. Ejecutar compra en Kraken
+    const quantity = (inversionEUR / ticker).toFixed(decimales.cantidad);
+    
     orderId = await kraken.buy(cleanPair, quantity);
-    if (!orderId) throw new Error("Fallo en Kraken.buy()");
-
-    // 5. Registrar en PostgreSQL
+    
+    // Registrar en base de datos
     await pool.query(
-      `INSERT INTO trades 
-        (pair, quantity, buyprice, highestprice, stoppercents, status, feeeur) 
-       VALUES ($1, $2, $3, $4, $5, 'active', $6)`,
-      [cleanPair, quantity, marketPrice, marketPrice, trailingStopPercent, 0]
+      `INSERT INTO trades (
+        pair, quantity, buyprice, highestprice, 
+        stoppercent, status, feeeur
+      ) VALUES (
+        $1, $2, $3, $3, $4, 'active', 0
+      )`,
+      [
+        cleanPair,
+        quantity,
+        ticker.toFixed(decimales.precio),
+        trailingStopPercent
+      ]
     );
 
     await pool.query("COMMIT");
-    console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${marketPrice}€`);
-    res.status(200).json({ message: "Compra exitosa" });
+    console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${ticker}€`);
+    res.status(200).json({ 
+      message: "Compra exitosa",
+      detalles: { par: cleanPair, cantidad: quantity, invertido: inversionEUR }
+    });
 
   } catch (err) {
     await pool.query("ROLLBACK");
     if (orderId) await kraken.cancelOrder(orderId);
-    console.error("❌ Error en /alerta:", err.message);
-    res.status(500).json({ error: "Error interno: " + err.message });
+    
+    const mensajeError = err.message.includes("decimales") 
+      ? "Error de formato en precio/cantidad" 
+      : err.message;
+    
+    console.error("❌ Error en /alerta:", mensajeError);
+    res.status(500).json({ 
+      error: "Error en ejecución",
+      detalle: mensajeError 
+    });
   }
 });
 
-// GET /estado (Versión mejorada)
+// GET /estado
 app.get("/estado", async (req, res) => {
   try {
     const [activos, completados] = await Promise.all([
@@ -92,7 +112,7 @@ app.get("/estado", async (req, res) => {
           quantity, 
           buyprice AS "buyPrice", 
           highestprice AS "highestPrice",
-          stoppercents AS "stopPercent",
+          stoppercent AS "stopPercent",
           createdat AS "createdAt"
          FROM trades 
          WHERE status = 'active' 
@@ -111,12 +131,10 @@ app.get("/estado", async (req, res) => {
          LIMIT 1`
       )
     ]);
-
     res.json({
       activos: activos.rows,
       ultimo_completado: completados.rows[0] || null
     });
-
   } catch (err) {
     console.error("❌ Error en /estado:", err.message);
     res.status(500).json({ 
@@ -126,7 +144,7 @@ app.get("/estado", async (req, res) => {
   }
 });
 
-// GET /historial (Versión unificada)
+// GET /historial
 app.get("/historial", async (req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -136,7 +154,7 @@ app.get("/historial", async (req, res) => {
         quantity,
         buyprice AS "buyPrice",
         sellprice AS "sellPrice",
-        stoppercents AS "stopPercent",
+        stoppercent AS "stopPercent",
         feeeur,
         status,
         createdat AS "createdAt",
@@ -155,7 +173,7 @@ app.get("/historial", async (req, res) => {
   }
 });
 
-// Endpoint GET /historial/:par (Versión mejorada)
+// GET /historial/:par
 app.get("/historial/:par", async (req, res) => {
   const par = req.params.par.toUpperCase().replace(/[^A-Z]/g, "");
   
@@ -167,7 +185,7 @@ app.get("/historial/:par", async (req, res) => {
         quantity,
         buyprice AS "buyPrice",
         sellprice AS "sellPrice",
-        stoppercents AS "stopPercent",
+        stoppercent AS "stopPercent",
         feeeur,
         status,
         createdat AS "createdAt"
@@ -176,14 +194,12 @@ app.get("/historial/:par", async (req, res) => {
        ORDER BY createdat DESC`, 
       [par]
     );
-
     if (rows.length === 0) {
       return res.status(404).json({ 
         mensaje: `No hay operaciones registradas para ${par}`,
         moneda: par
       });
     }
-
     res.json(rows);
   } catch (err) {
     console.error(`❌ Error en historial de ${par}:`, err.message);
@@ -194,12 +210,10 @@ app.get("/historial/:par", async (req, res) => {
   }
 });
 
+// Sincronización
 const sincronizarTrades = require("./sincronizador");
-
-// Endpoint de sincronización mejorado
 app.get("/sincronizar", async (req, res) => {
   try {
-    // Validación de seguridad reforzada
     const authToken = req.query.token;
     if (!authToken || authToken !== process.env.SYNC_TOKEN) {
       console.warn("⚠️ Intento de sincronización no autorizado");
@@ -208,7 +222,7 @@ app.get("/sincronizar", async (req, res) => {
         codigo: "AUTH_REQUIRED"
       });
     }
-
+    
     console.log("🔄 Iniciando sincronización manual...");
     const resultado = await sincronizarTrades();
     
@@ -217,10 +231,8 @@ app.get("/sincronizar", async (req, res) => {
       message: "Sincronización completada",
       detalles: resultado
     });
-
   } catch (error) {
     console.error("❌ Error crítico en sincronización:", error.message);
-    
     res.status(500).json({
       error: "Fallo en sincronización",
       codigo: "SYNC_FAILED",
@@ -231,13 +243,12 @@ app.get("/sincronizar", async (req, res) => {
   }
 });
 
-// Inicio seguro del servidor
+// Inicio del servidor
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🚀 Servidor operativo en puerto ${port}`);
   console.log("🔒 Modo de seguridad:", process.env.NODE_ENV || "development");
   
-  // Inicia tradeManager solo si no está en test
   if (process.env.NODE_ENV !== "test") {
     require("./tradeManager");
   }

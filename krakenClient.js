@@ -44,6 +44,11 @@ function interpretarErrorKraken(errorArray) {
   return errorArray.join(" | ");
 }
 
+async function getAvailableBalance() {
+  const response = await kraken.api("TradeBalance", { asset: "ZEUR" });
+  return parseFloat(response.result.eb); // Balance disponible en EUR
+}
+
 async function getBalance() {
   try {
     const response = await kraken.api("Balance");
