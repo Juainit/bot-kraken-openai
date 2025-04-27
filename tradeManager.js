@@ -148,7 +148,7 @@ async function updateTrades() {
       }
 
       // ============ NUEVA VALIDACIÓN DE SALDO ============
-      const asset = pair.replace(/USD|EUR/g, '');
+      const asset = trade.pair.replace(/USD$|EUR$/, '');
       const saldoActual = parseFloat(balance[asset] || 0);
       
       if (saldoActual < quantity) {
