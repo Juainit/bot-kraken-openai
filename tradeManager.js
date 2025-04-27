@@ -122,6 +122,7 @@ async function verificarDisponibilidadVenta(trade, balance) {
 
 async function updateTrades() {
   try {
+    // 1. Obtener trades activos con todos los campos necesarios
     const { rows: tradesActivos } = await pool.query(`
       SELECT 
         id, pair, quantity, buyprice, highestprice, 
@@ -129,34 +130,43 @@ async function updateTrades() {
       FROM trades 
       WHERE status = 'active'
     `);
-    if (!tradesActivos.length) return console.log("⏭ No hay trades activos");
-    const precios = await Promise.allSettled(
-      tradesActivos.map(trade => getCachedPrice(trade.pair))
-    );
-    const balance = await retry(() => kraken.getBalance(), 3);
-    if (!balance || Object.keys(balance).length === 0) {
-      return console.warn("⚠️ Balance no disponible - Ciclo omitido");
-    }
     
+    if (!tradesActivos.length) {
+      console.log("⏭ No hay trades activos");
+      return;
+    }
+
+    // 2. Obtener precios y balance en paralelo para eficiencia
+    const [precios, balance] = await Promise.all([
+      Promise.allSettled(tradesActivos.map(trade => getCachedPrice(trade.pair))),
+      retry(() => kraken.getBalance(), 3)
+    ]);
+
+    if (!balance || Object.keys(balance).length === 0) {
+      console.warn("⚠️ Balance no disponible - Ciclo omitido");
+      return;
+    }
+
+    // 3. Procesar cada trade con validaciones mejoradas
     for (const [i, trade] of tradesActivos.entries()) {
-      const { id, pair, createdat, limitorderid, quantity, buyprice } = trade;
+      const { id, pair, createdat, limitorderid, quantity } = trade;
       
-      // Validación de trade reciente
+      // Validación de trade reciente (2 minutos de protección)
       if (Date.now() - new Date(createdat).getTime() < 120000) {
         console.log(`⏳ ${pair}: Trade muy reciente`);
         continue;
       }
 
-      // ============ NUEVA VALIDACIÓN DE SALDO ============
-      const asset = trade.pair.replace(/USD$|EUR$/, '');
+      // ===== [NUEVO] Validación de saldo en tiempo real =====
+      const asset = pair.replace(/USD$|EUR$/, '');
       const saldoActual = parseFloat(balance[asset] || 0);
       
       if (saldoActual < quantity) {
-        console.log(`🛑 Saldo insuficiente: ${pair} (${saldoActual} < ${quantity}). Marcando como failed...`);
+        console.log(`🛑 Saldo insuficiente: ${pair} (${saldoActual} < ${quantity})`);
         await pool.query("UPDATE trades SET status='failed' WHERE id=$1", [id]);
         continue;
       }
-      // ===================================================
+      // ======================================================
 
       const marketPrice = precios[i]?.value;
       if (!marketPrice) {
@@ -164,34 +174,45 @@ async function updateTrades() {
         continue;
       }
 
-      // ... resto de la lógica original ...
+      // Lógica de trailing stop
       const nuevaHighest = Math.max(trade.highestprice, marketPrice);
       const trailingValue = nuevaHighest * (trade.stoppercent / 100);
       const stopPrice = nuevaHighest - trailingValue;
+      
+      // Niveles clave para toma de decisiones
       const limiteVenta = nuevaHighest - (trailingValue * 0.98);
-      const emergencia = stopPrice - (trailingValue * 0.02);
+      const nivelEmergencia = stopPrice - (trailingValue * 0.02);
 
+      // Actualizar precio máximo si es necesario
       if (nuevaHighest > trade.highestprice) {
         await actualizarHighestPrice(trade.id, nuevaHighest);
+        
+        // [NUEVO] Cancelar orden previa con delay de 2s
         if (limitorderid) {
           await kraken.cancelOrder(limitorderid);
           await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [trade.id]);
           console.log(`🛑 Orden cancelada: ${pair}`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Evitar rate limit
         }
       }
 
+      // Estrategia de venta
       if (marketPrice <= limiteVenta) {
         await manejarVentaLimit(trade, stopPrice);
-      } else if (marketPrice <= emergencia) {
+      } else if (marketPrice <= nivelEmergencia) {
         await manejarVentaEmergencia(trade, marketPrice);
       }
 
+      // [NUEVO] Verificación final de disponibilidad
       const puedeVender = await verificarDisponibilidadVenta(trade, balance);
-      if (!puedeVender) console.warn(`⏸️ No se puede vender ${pair} por saldo insuficiente`);
+      if (!puedeVender) {
+        console.warn(`⏸️ ${pair}: Saldo insuficiente post-validación`);
+      }
     }
   } catch (err) {
     console.error("❌ Error crítico en updateTrades:", err.message);
+    // [NUEVO] Notificar a sistema de monitoreo externo
+    // enviarAlertaSlack(`Fallo en updateTrades: ${err.message}`);
   }
 }
 
