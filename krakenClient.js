@@ -1,18 +1,46 @@
 require("dotenv").config();
 const KrakenClient = require("kraken-api");
-
 const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
 
-function interpretarErrorKraken(errorArray) {
-  if (!Array.isArray(errorArray)) return "Error desconocido";
+// Función mejorada para validar pares y obtener decimales
+async function validarPar(par) {
+  try {
+    const response = await kraken.api("AssetPairs");
+    const pairInfo = response.result[par];
+    
+    if (!pairInfo) {
+      console.error(`❌ Par ${par} no registrado en Kraken`);
+      return { valido: false, decimales: null };
+    }
 
+    return {
+      valido: true,
+      decimales: {
+        precio: pairInfo.pair_decimals || 4,
+        cantidad: pairInfo.lot_decimals || 8
+      }
+    };
+  } catch (error) {
+    console.error(`❌ Fallo validación par ${par}: ${error.message}`);
+    return { valido: false, decimales: null };
+  }
+}
+
+// Interpretador de errores mejorado
+function interpretarErrorKraken(errorArray) {
+  console.log("🔍 Raw Kraken Error:", errorArray);
+  if (!Array.isArray(errorArray)) return "Error desconocido";
+  
   if (errorArray.some(e => e.includes("EQuery:Unknown asset pair"))) {
     return "Par no válido o mal escrito";
   }
   if (errorArray.some(e => e.includes("EOrder:Insufficient funds"))) {
     return "Fondos insuficientes para operar";
   }
-
+  if (errorArray.some(e => e.includes("EOrder:Rate limit exceeded"))) {
+    return "Límite de solicitudes excedido";
+  }
+  
   return errorArray.join(" | ");
 }
 
@@ -42,12 +70,15 @@ async function getTicker(par) {
 
 async function buy(par, cantidad) {
   try {
-    const volume = cantidad.toString();
+    const validacion = await validarPar(par);
+    if (!validacion.valido) throw new Error(`Par ${par} no válido`);
+    
+    const volumenFormateado = Number(cantidad).toFixed(validacion.decimales.cantidad);
     const order = await kraken.api("AddOrder", {
       pair: par,
       type: "buy",
       ordertype: "market",
-      volume: volume
+      volume: volumenFormateado
     });
     console.log(`🛒 Compra ejecutada: ${cantidad} ${par}`);
     return order.result.txid[0];
@@ -60,32 +91,19 @@ async function buy(par, cantidad) {
 
 async function sellLimit(par, cantidad, precio) {
   try {
-    // 1. Obtener metadata de pares desde Kraken
-    const assetPairsInfo = await kraken.api('AssetPairs');
-    const assetPairs = assetPairsInfo.result;
+    const validacion = await validarPar(par);
+    if (!validacion.valido) throw new Error(`Par ${par} no válido`);
 
-    // 2. Buscar el par correcto en el diccionario
-    const pairInfo = Object.values(assetPairs).find(p => p.altname === par);
-    if (!pairInfo) {
-      throw new Error(`Par ${par} no encontrado en AssetPairs`);
-    }
+    const volumenFormateado = Number(cantidad).toFixed(validacion.decimales.cantidad);
+    const precioFormateado = Number(precio).toFixed(validacion.decimales.precio);
 
-    // 3. Determinar la cantidad de decimales permitidos
-    const decimales = pairInfo.pair_decimals || 4; // Valor por defecto
-
-    // 4. Formatear precio al número de decimales
-    const volume = cantidad.toString();
-    const precioFormateado = precio.toFixed(decimales);
-
-    // 5. Ejecutar orden de venta límite
     const order = await kraken.api("AddOrder", {
       pair: par,
       type: "sell",
       ordertype: "limit",
-      volume: volume,
+      volume: volumenFormateado,
       price: precioFormateado
     });
-
     console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precioFormateado}`);
     return order.result.txid[0];
   } catch (error) {
@@ -97,12 +115,15 @@ async function sellLimit(par, cantidad, precio) {
 
 async function sell(par, cantidad) {
   try {
-    const volume = cantidad.toString();
+    const validacion = await validarPar(par);
+    if (!validacion.valido) throw new Error(`Par ${par} no válido`);
+    
+    const volumenFormateado = Number(cantidad).toFixed(validacion.decimales.cantidad);
     const order = await kraken.api("AddOrder", {
       pair: par,
       type: "sell",
       ordertype: "market",
-      volume: volume
+      volume: volumenFormateado
     });
     console.log(`💰 Venta a mercado ejecutada: ${cantidad} ${par}`);
     return order;
@@ -129,7 +150,6 @@ async function checkOrderExecuted(orderId) {
   try {
     const info = await kraken.api("QueryOrders", { txid: orderId });
     const order = info.result[orderId];
-
     if (order.status === 'closed' && parseFloat(order.vol_exec) > 0) {
       return {
         price: parseFloat(order.price),
@@ -137,7 +157,6 @@ async function checkOrderExecuted(orderId) {
         status: order.status
       };
     }
-
     return null;
   } catch (error) {
     const mensaje = interpretarErrorKraken(error.error || []);
@@ -154,5 +173,6 @@ module.exports = {
   sellLimit,
   cancelOrder,
   checkOrderExecuted,
-  api: (...args) => kraken.api(...args) // 🔧 AÑADE ESTA LÍNEA
+  validarPar,
+  api: (...args) => kraken.api(...args)
 };
