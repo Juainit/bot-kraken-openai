@@ -130,7 +130,6 @@ async function updateTrades() {
       WHERE status = 'active'
     `);
     if (!tradesActivos.length) return console.log("⏭ No hay trades activos");
-
     const precios = await Promise.allSettled(
       tradesActivos.map(trade => getCachedPrice(trade.pair))
     );
@@ -138,19 +137,34 @@ async function updateTrades() {
     if (!balance || Object.keys(balance).length === 0) {
       return console.warn("⚠️ Balance no disponible - Ciclo omitido");
     }
-
+    
     for (const [i, trade] of tradesActivos.entries()) {
       const { id, pair, createdat, limitorderid, quantity, buyprice } = trade;
+      
+      // Validación de trade reciente
       if (Date.now() - new Date(createdat).getTime() < 120000) {
         console.log(`⏳ ${pair}: Trade muy reciente`);
         continue;
       }
+
+      // ============ NUEVA VALIDACIÓN DE SALDO ============
+      const asset = pair.replace(/USD|EUR/g, '');
+      const saldoActual = parseFloat(balance[asset] || 0);
+      
+      if (saldoActual < quantity) {
+        console.log(`🛑 Saldo insuficiente: ${pair} (${saldoActual} < ${quantity}). Marcando como failed...`);
+        await pool.query("UPDATE trades SET status='failed' WHERE id=$1", [id]);
+        continue;
+      }
+      // ===================================================
+
       const marketPrice = precios[i]?.value;
       if (!marketPrice) {
         console.warn(`⚠️ ${pair}: Precio no disponible`);
         continue;
       }
 
+      // ... resto de la lógica original ...
       const nuevaHighest = Math.max(trade.highestprice, marketPrice);
       const trailingValue = nuevaHighest * (trade.stoppercent / 100);
       const stopPrice = nuevaHighest - trailingValue;
