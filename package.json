@@ -21,14 +21,14 @@
   "description": "Bot de trading automatizado para Kraken con gestión de riesgos",
   "dependencies": {
     "axios": "^1.8.4",
-    "date-fns": "^3.3.1",        // [2] Nueva dependencia
+    "date-fns": "^3.3.1",       
     "dayjs": "^1.11.13",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
-    "jest": "^29.7.0",           // [2] Añadido para testing
-    "kraken-api": "^1.2.0",      // [2] Versión actualizada
+    "jest": "^29.7.0",           
+    "kraken-api": "^1.2.0",     
     "pg": "^8.14.1",
-    "pino": "^8.18.0",           // [2] Nuevo logger estructurado
+    "pino": "^8.18.0",          
     "sqlite3": "^5.1.7"
   },
   "engines": {
