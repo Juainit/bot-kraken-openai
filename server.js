@@ -1,255 +1,248 @@
-// ✅ Versión optimizada y segura:
-require("dotenv").config(); 
-const express = require("express");
-const { Pool } = require("pg");
-const app = express();
+// server.js - Versión 3.1 Optimizada
+require('dotenv').config();
+const express = require('express');
+const { Pool } = require('pg');
+const kraken = require('./krakenClient');
+const { format } = require('date-fns');
 
-// Configuración básica
-app.use(express.json());
+// 1. Configuración inicial
+const app = express();
+const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// 2. Configuración de base de datos
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("railway") 
-    ? { rejectUnauthorized: false } 
-    : false
+  ssl: {
+    rejectUnauthorized: process.env.NODE_ENV === 'production',
+  },
 });
 
-const kraken = require("./krakenClient");
+// 3. Middlewares de seguridad
+app.use(express.json({ limit: '10kb' }));
+app.use((req, res, next) => {
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'DENY');
+  res.header('Content-Security-Policy', "default-src 'self'");
+  next();
+});
 
-// Endpoint POST /alerta - Versión mejorada
-app.post("/alerta", async (req, res) => {
-  let orderId;
-  const { par, trailingStopPercent, inversion } = req.body;
-
+// 4. Endpoint: /alerta (POST)
+app.post('/alerta', async (req, res) => {
+  const startTime = Date.now();
+  const transaction = await pool.connect();
+  
   try {
-    // Validaciones básicas
-    if (!par || typeof par !== "string") {
-      return res.status(400).json({ error: "Par requerido y debe ser texto" });
+    // 4.1 Validación de entrada
+    const { par, trailingStopPercent, inversion } = req.body;
+    const erroresValidacion = [];
+    
+    if (!/^[A-Z]{6,8}$/.test(par)) {
+      erroresValidacion.push('Formato de par inválido (ejemplo: ADAEUR)');
     }
-    if (typeof trailingStopPercent !== "number" || trailingStopPercent < 1) {
-      return res.status(400).json({ error: "Trailing stop debe ser ≥1%" });
+    
+    if (typeof trailingStopPercent !== 'number' || trailingStopPercent < 1 || trailingStopPercent > 20) {
+      erroresValidacion.push('El trailing stop debe estar entre 1% y 20%');
+    }
+    
+    if (erroresValidacion.length > 0) {
+      return res.status(400).json({
+        error: 'Validación fallida',
+        detalles: erroresValidacion,
+        codigo: 'VALIDACION_001'
+      });
     }
 
-    await pool.query("BEGIN");
-    const cleanPair = par.replace(/[^A-Z]/g, "").toUpperCase();
-
-    // Verificar operaciones existentes
-    const { rows: existing } = await pool.query(
-      "SELECT 1 FROM trades WHERE pair = $1 AND status = 'active'",
+    // 4.2 Bloqueo de transacción
+    await transaction.query('BEGIN');
+    const cleanPair = par.toUpperCase();
+    
+    // 4.3 Verificación de operación existente
+    const { rows: existing } = await transaction.query(
+      `SELECT id FROM trades 
+       WHERE pair = $1 AND status = 'active'
+       FOR UPDATE NOWAIT`,
       [cleanPair]
     );
     
     if (existing.length > 0) {
-      await pool.query("ROLLBACK");
-      return res.status(400).json({ error: "Operación activa existente" });
+      await transaction.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Operación duplicada',
+        codigo: 'TRADING_001',
+        solucion: 'Cancelar operación existente primero'
+      });
     }
 
-    // Lógica de inversión dinámica
-    let inversionEUR = process.env.DEFAULT_INVERSION || 40;
-    if (process.env.REINVERSION === 'true') {
-      const balance = await kraken.getAvailableBalance();
-      inversionEUR = Math.max(balance, 40);
+    // 4.4 Validación técnica del par
+    const validacionPar = await kraken.validarPar(cleanPair);
+    if (!validacionPar.valido) {
+      await transaction.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'Par no soportado',
+        codigo: 'TRADING_002',
+        pares_validos: 'https://api.kraken.com/0/public/AssetPairs'
+      });
     }
 
-    // Obtener metadata del par
-    const { decimales } = await kraken.validarPar(cleanPair);
-    if (!decimales) {
-      await pool.query("ROLLBACK");
-      return res.status(400).json({ error: "Par no válido" });
+    // 4.5 Cálculo de balance efectivo
+    const baseAsset = cleanPair.replace(/EUR|USD/g, '');
+    const balanceDisponible = await kraken.getEffectiveBalance(baseAsset);
+    const inversionFinal = Math.min(
+      inversion || process.env.DEFAULT_INVERSION ||40,
+      balanceDisponible
+    );
+
+    if (inversionFinal < 25) {
+      await transaction.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'Fondos insuficientes',
+        codigo: 'BALANCE_001',
+        balance_disponible: balanceDisponible,
+        inversion_minima: '25 EUR'
+      });
     }
 
-    // Ejecutar compra
-    const ticker = await kraken.getTicker(cleanPair);
-    const quantity = (inversionEUR / ticker).toFixed(decimales.cantidad);
+    // 4.6 Ejecución de la orden
+    const precioActual = await kraken.getTicker(cleanPair);
+    const cantidad = (inversionFinal / precioActual).toFixed(validacionPar.decimales.cantidad);
     
-    orderId = await kraken.buy(cleanPair, quantity);
-    
-    // Registrar en base de datos
-    await pool.query(
+    const orden = await kraken.buy(cleanPair, cantidad, {
+      intentos: 3,
+      delay: 2000
+    });
+
+    // 4.7 Registro en base de datos
+    await transaction.query(
       `INSERT INTO trades (
         pair, quantity, buyprice, highestprice, 
-        stoppercent, status, feeeur
+        stoppercent, status, metadata
       ) VALUES (
-        $1, $2, $3, $3, $4, 'active', 0
-      )`,
+        $1, $2, $3, $3, $4, 'active', $5
+      ) RETURNING id`,
       [
         cleanPair,
-        quantity,
-        ticker.toFixed(decimales.precio),
-        trailingStopPercent
+        cantidad,
+        precioActual.toFixed(validacionPar.decimales.precio),
+        trailingStopPercent,
+        {
+          user_agent: req.headers['user-agent'],
+          execution_time: Date.now() - startTime,
+          kraken_txid: orden.txid
+        }
       ]
     );
 
-    await pool.query("COMMIT");
-    console.log(`✅ COMPRA: ${quantity} ${cleanPair} @ ${ticker}€`);
-    res.status(200).json({ 
-      message: "Compra exitosa",
-      detalles: { par: cleanPair, cantidad: quantity, invertido: inversionEUR }
+    await transaction.query('COMMIT');
+
+    // 4.8 Respuesta exitosa
+    res.status(201).json({
+      status: 'success',
+      data: {
+        par: cleanPair,
+        cantidad: cantidad,
+        precio: precioActual,
+        inversion: inversionFinal,
+        txid: orden.txid
+      },
+      meta: {
+        timestamp: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
+        response_time: `${Date.now() - startTime}ms`
+      }
     });
 
-  } catch (err) {
-    await pool.query("ROLLBACK");
-    if (orderId) await kraken.cancelOrder(orderId);
+  } catch (error) {
+    await transaction.query('ROLLBACK');
     
-    const mensajeError = err.message.includes("decimales") 
-      ? "Error de formato en precio/cantidad" 
-      : err.message;
+    // 4.9 Manejo estructurado de errores
+    const errorInfo = kraken.interpretarErrorKraken(error.error || error.message);
     
-    console.error("❌ Error en /alerta:", mensajeError);
-    res.status(500).json({ 
-      error: "Error en ejecución",
-      detalle: mensajeError 
+    res.status(errorInfo.status || 500).json({
+      status: 'error',
+      codigo: errorInfo.codigo || 'ERROR_DESCONOCIDO',
+      mensaje: errorInfo.mensaje,
+      ...(NODE_ENV !== 'production' && { stack: error.stack })
     });
+    
+    console.error(`[${format(new Date(), 'yyyy-MM-dd HH:mm:ss')}] ${errorInfo.codigo}: ${errorInfo.mensaje}`);
+  } finally {
+    transaction.release();
   }
 });
 
-// GET /estado
-app.get("/estado", async (req, res) => {
+// 5. Endpoint: /estado (GET)
+app.get('/estado', async (req, res) => {
   try {
-    const [activos, completados] = await Promise.all([
-      pool.query(
-        `SELECT 
-          pair, 
-          quantity, 
-          buyprice AS "buyPrice", 
-          highestprice AS "highestPrice",
-          stoppercent AS "stopPercent",
-          createdat AS "createdAt"
-         FROM trades 
-         WHERE status = 'active' 
-         ORDER BY createdat DESC`
-      ),
-      pool.query(
-        `SELECT 
-          pair,
-          sellprice AS "sellPrice",
-          profitpercent AS "profitPercent",
-          feeeur,
-          createdat AS "createdAt"
-         FROM trades 
-         WHERE status = 'completed' 
-         ORDER BY createdat DESC 
-         LIMIT 1`
-      )
+    const [activos, historial] = await Promise.all([
+      pool.query(`SELECT * FROM trades WHERE status = 'active'`),
+      pool.query(`SELECT * FROM trades ORDER BY createdat DESC LIMIT 10`)
     ]);
+
     res.json({
-      activos: activos.rows,
-      ultimo_completado: completados.rows[0] || null
-    });
-  } catch (err) {
-    console.error("❌ Error en /estado:", err.message);
-    res.status(500).json({ 
-      error: "Error al consultar estado",
-      detalle: err.message 
-    });
-  }
-});
-
-// GET /historial
-app.get("/historial", async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT 
-        id,
-        pair,
-        quantity,
-        buyprice AS "buyPrice",
-        sellprice AS "sellPrice",
-        stoppercent AS "stopPercent",
-        feeeur,
-        status,
-        createdat AS "createdAt",
-        updatedat AS "updatedAt"
-      FROM trades 
-      ORDER BY createdat DESC`
-    );
-    
-    res.json(rows);
-  } catch (err) {
-    console.error("❌ Error al obtener historial:", err.message);
-    res.status(500).json({ 
-      error: "Error al obtener historial completo",
-      detalle: err.message 
-    });
-  }
-});
-
-// GET /historial/:par
-app.get("/historial/:par", async (req, res) => {
-  const par = req.params.par.toUpperCase().replace(/[^A-Z]/g, "");
-  
-  try {
-    const { rows } = await pool.query(
-      `SELECT 
-        id,
-        pair,
-        quantity,
-        buyprice AS "buyPrice",
-        sellprice AS "sellPrice",
-        stoppercent AS "stopPercent",
-        feeeur,
-        status,
-        createdat AS "createdAt"
-       FROM trades 
-       WHERE pair = $1 
-       ORDER BY createdat DESC`, 
-      [par]
-    );
-    if (rows.length === 0) {
-      return res.status(404).json({ 
-        mensaje: `No hay operaciones registradas para ${par}`,
-        moneda: par
-      });
-    }
-    res.json(rows);
-  } catch (err) {
-    console.error(`❌ Error en historial de ${par}:`, err.message);
-    res.status(500).json({ 
-      error: `Error al obtener historial de ${par}`,
-      detalle: err.message 
-    });
-  }
-});
-
-// Sincronización
-const sincronizarTrades = require("./sincronizador");
-app.get("/sincronizar", async (req, res) => {
-  try {
-    const authToken = req.query.token;
-    if (!authToken || authToken !== process.env.SYNC_TOKEN) {
-      console.warn("⚠️ Intento de sincronización no autorizado");
-      return res.status(403).json({ 
-        error: "Acceso denegado",
-        codigo: "AUTH_REQUIRED"
-      });
-    }
-    
-    console.log("🔄 Iniciando sincronización manual...");
-    const resultado = await sincronizarTrades();
-    
-    res.json({
-      status: "success",
-      message: "Sincronización completada",
-      detalles: resultado
+      status: 'success',
+      data: {
+        operaciones_activas: activos.rows,
+        historial_reciente: historial.rows
+      },
+      meta: {
+        total_activas: activos.rowCount,
+        total_historial: historial.rowCount
+      }
     });
   } catch (error) {
-    console.error("❌ Error crítico en sincronización:", error.message);
     res.status(500).json({
-      error: "Fallo en sincronización",
-      codigo: "SYNC_FAILED",
-      detalle: process.env.NODE_ENV === "production" 
-        ? "Ver logs del servidor" 
-        : error.message
+      status: 'error',
+      codigo: 'ESTADO_001',
+      mensaje: 'Error al obtener estado'
     });
   }
 });
 
-// Inicio del servidor
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🚀 Servidor operativo en puerto ${port}`);
-  console.log("🔒 Modo de seguridad:", process.env.NODE_ENV || "development");
-  
-  if (process.env.NODE_ENV !== "test") {
-    require("./tradeManager");
+// 6. Health Check
+app.get('/health', async (req, res) => {
+  const checks = {
+    database: false,
+    kraken_api: false,
+    memory_usage: process.memoryUsage().rss / 1024 / 1024
+  };
+
+  try {
+    await pool.query('SELECT 1');
+    checks.database = true;
+    
+    const time = await kraken.api('Time');
+    checks.kraken_api = !!time.result.unixtime;
+  } catch (error) {
+    console.error('Health check failed:', error);
   }
+
+  res.json({
+    status: checks.database && checks.kraken_api ? 'OK' : 'DEGRADED',
+    checks,
+    uptime: process.uptime(),
+    environment: NODE_ENV,
+    timestamp: Date.now()
+  });
 });
+
+// 7. Inicio del servidor
+app.listen(PORT, () => {
+  console.log(`
+  ██████╗  ██████╗ ████████╗
+  ██╔══██╗██╔═══██╗╚══██╔══╝
+  ██████╔╝██║   ██║   ██║   
+  ██╔══██╗██║   ██║   ██║   
+  ██║  ██║╚██████╔╝   ██║   
+  ╚═╝  ╚═╝ ╚═════╝    ╚═╝   
+  `);
+  console.log(`🚀 Servidor activo en puerto ${PORT}`);
+  console.log(`🔧 Entorno: ${NODE_ENV}`);
+  console.log(`⏱️  Hora de inicio: ${format(new Date(), 'yyyy-MM-dd HH:mm:ss')}`);
+});
+
+// 8. Manejo de errores global
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Rechazo no manejado:', reason.stack || reason);
+});
+
+module.exports = app;
