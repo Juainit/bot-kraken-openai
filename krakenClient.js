@@ -1,16 +1,29 @@
 require("dotenv").config();
 const KrakenClient = require("kraken-api");
-const kraken = new KrakenClient(process.env.API_KEY, process.env.API_SECRET);
+const { format } = require("date-fns");
 
-// Función mejorada para validar pares y obtener decimales
+const kraken = new KrakenClient(
+  process.env.API_KEY, 
+  process.env.API_SECRET,
+  { timeout: 20000 }
+);
+
+// Función mejorada con verificación de órdenes existentes
 async function validarPar(par) {
+  const timestamp = format(new Date(), "yyyy-MM-dd HH:mm:ss");
   try {
-    const response = await kraken.api("AssetPairs");
+    const response = await this.api("AssetPairs");
     const pairInfo = response.result[par];
     
     if (!pairInfo) {
-      console.error(`❌ Par ${par} no registrado en Kraken`);
+      console.error(`[${timestamp}] ❌ Par ${par} no válido`);
       return { valido: false, decimales: null };
+    }
+
+    // Verificar si ya hay órdenes abiertas para este par [1][7]
+    const openOrders = await this.getOpenOrders(par);
+    if (openOrders.length > 0) {
+      console.warn(`[${timestamp}] ⚠️ Par ${par} tiene ${openOrders.length} órdenes pendientes`);
     }
 
     return {
@@ -18,166 +31,198 @@ async function validarPar(par) {
       decimales: {
         precio: pairInfo.pair_decimals || 4,
         cantidad: pairInfo.lot_decimals || 8
-      }
+      },
+      ordenesPendientes: openOrders.length
     };
   } catch (error) {
-    console.error(`❌ Fallo validación par ${par}: ${error.message}`);
+    console.error(`[${timestamp}] ❌ Fallo validación ${par}: ${this.interpretarError(error)}`);
     return { valido: false, decimales: null };
   }
 }
 
-// Interpretador de errores mejorado
+// Sistema de errores ampliado con códigos
 function interpretarErrorKraken(errorArray) {
-  console.log("🔍 Raw Kraken Error:", errorArray);
-  if (!Array.isArray(errorArray)) return "Error desconocido";
-  
-  if (errorArray.some(e => e.includes("EQuery:Unknown asset pair"))) {
-    return "Par no válido o mal escrito";
+  const timestamp = format(new Date(), "HH:mm:ss.SSS");
+  const errores = {
+    'EQuery:Unknown asset pair': 'Par inválido',
+    'EOrder:Insufficient funds': 'Fondos insuficientes',
+    'EOrder:Rate limit exceeded': 'Límite de solicitudes',
+    'EGeneral:Invalid arguments': 'Argumentos inválidos',
+    'EService:Unavailable': 'Servicio no disponible'
+  };
+
+  if (!Array.isArray(errorArray) || errorArray.length === 0) {
+    console.error(`[${timestamp}] 🔍 Error vacío - Verificar conexión API`);
+    return 'Error desconocido - Respuesta vacía de Kraken';
   }
-  if (errorArray.some(e => e.includes("EOrder:Insufficient funds"))) {
-    return "Fondos insuficientes para operar";
-  }
-  if (errorArray.some(e => e.includes("EOrder:Rate limit exceeded"))) {
-    return "Límite de solicitudes excedido";
-  }
-  
-  return errorArray.join(" | ");
-}
 
-async function getAvailableBalance() {
-  const response = await kraken.api("TradeBalance", { asset: "ZEUR" });
-  return parseFloat(response.result.eb); // Balance disponible en EUR
-}
-
-async function getBalance() {
-  try {
-    const response = await kraken.api("Balance");
-    return response.result;
-  } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al obtener balance: ${mensaje}`);
-    return {};
-  }
-}
-
-async function getTicker(par) {
-  try {
-    const ticker = await kraken.api("Ticker", { pair: par });
-    const price = parseFloat(ticker.result[par].c[0]);
-    console.log(`📈 Precio actual de ${par}: ${price}`);
-    return price;
-  } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al obtener precio de ${par}: ${mensaje}`);
-    return null;
-  }
-}
-
-async function buy(par, cantidad) {
-  try {
-    const validacion = await validarPar(par);
-    if (!validacion.valido) throw new Error(`Par ${par} no válido`);
-    
-    const volumenFormateado = Number(cantidad).toFixed(validacion.decimales.cantidad);
-    const order = await kraken.api("AddOrder", {
-      pair: par,
-      type: "buy",
-      ordertype: "market",
-      volume: volumenFormateado
-    });
-    console.log(`🛒 Compra ejecutada: ${cantidad} ${par}`);
-    return order.result.txid[0];
-  } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al comprar ${par}: ${mensaje}`);
-    return null;
-  }
-}
-
-async function sellLimit(par, cantidad, precio) {
-  try {
-    const validacion = await validarPar(par);
-    if (!validacion.valido) throw new Error(`Par ${par} no válido`);
-
-    const volumenFormateado = Number(cantidad).toFixed(validacion.decimales.cantidad);
-    const precioFormateado = Number(precio).toFixed(validacion.decimales.precio);
-
-    const order = await kraken.api("AddOrder", {
-      pair: par,
-      type: "sell",
-      ordertype: "limit",
-      volume: volumenFormateado,
-      price: precioFormateado
-    });
-    console.log(`🧷 Venta LÍMITE colocada: ${cantidad} ${par} a ${precioFormateado}`);
-    return order.result.txid[0];
-  } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al colocar orden límite de ${par}: ${mensaje}`);
-    return null;
-  }
-}
-
-async function sell(par, cantidad) {
-  try {
-    const validacion = await validarPar(par);
-    if (!validacion.valido) throw new Error(`Par ${par} no válido`);
-    
-    const volumenFormateado = Number(cantidad).toFixed(validacion.decimales.cantidad);
-    const order = await kraken.api("AddOrder", {
-      pair: par,
-      type: "sell",
-      ordertype: "market",
-      volume: volumenFormateado
-    });
-    console.log(`💰 Venta a mercado ejecutada: ${cantidad} ${par}`);
-    return order;
-  } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al vender ${par}: ${mensaje}`);
-    return null;
-  }
-}
-
-async function cancelOrder(orderId) {
-  try {
-    const cancel = await kraken.api("CancelOrder", { txid: orderId });
-    console.log(`🛑 Orden cancelada: ${orderId}`);
-    return cancel;
-  } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al cancelar orden ${orderId}: ${mensaje}`);
-    return null;
-  }
-}
-
-async function checkOrderExecuted(orderId) {
-  try {
-    const info = await kraken.api("QueryOrders", { txid: orderId });
-    const order = info.result[orderId];
-    if (order.status === 'closed' && parseFloat(order.vol_exec) > 0) {
-      return {
-        price: parseFloat(order.price),
-        fee: parseFloat(order.fee),
-        status: order.status
-      };
+  for (const [codigo, mensaje] of Object.entries(errores)) {
+    if (errorArray.some(e => e.includes(codigo))) {
+      console.warn(`[${timestamp}] ⚠️ Código error: ${codigo}`);
+      return mensaje;
     }
-    return null;
+  }
+  
+  console.error(`[${timestamp}] � Error no catalogado:`, JSON.stringify(errorArray));
+  return `Error múltiple: ${errorArray.join(' | ')}`;
+}
+
+// Balance efectivo (disponible - reservado en órdenes)
+async function getEffectiveBalance(asset) {
+  try {
+    const [balance, openOrders] = await Promise.all([
+      this.getBalance(asset),
+      this.getOpenOrders()
+    ]);
+
+    const reservado = openOrders.reduce((total, orden) => {
+      return orden.pair.startsWith(asset) ? total + parseFloat(orden.vol) : total;
+    }, 0);
+
+    console.log(`[${format(new Date(), "HH:mm:ss")}] 💰 Balance ${asset}: ${balance} (Reservado: ${reservado})`);
+    
+    return Math.max(balance - reservado, 0);
   } catch (error) {
-    const mensaje = interpretarErrorKraken(error.error || []);
-    console.error(`❌ Error al consultar estado de orden ${orderId}: ${mensaje}`);
+    console.error(`Error balance efectivo: ${this.interpretarError(error)}`);
+    return 0;
+  }
+}
+
+// Nueva función para obtener órdenes abiertas
+async function getOpenOrders(pairFilter = null) {
+  try {
+    const response = await this.api("OpenOrders");
+    const orders = Object.values(response.result.open);
+    
+    return pairFilter 
+      ? orders.filter(o => o.descr.pair === pairFilter)
+      : orders;
+  } catch (error) {
+    console.error(`Error obteniendo órdenes: ${this.interpretarError(error)}`);
+    return [];
+  }
+}
+
+// Función de venta límite con control de duplicados
+async function sellLimit(par, cantidad, precio) {
+  const timestamp = format(new Date(), "yyyyMMdd-HHmmss");
+  const MAX_INTENTOS = 3;
+  const DELAY_ANTI_RATELIMIT = 2500; // 2.5 segundos
+  
+  try {
+    // 1. Verificación mejorada de órdenes abiertas (consulta directa a Kraken)
+    const ordenesAbiertas = await this.getOpenOrders(par);
+    if (ordenesAbiertas.length > 0) {
+      throw new Error(`[DUPLICADO] Par ${par} tiene orden activa: ${ordenesAbiertas[0].txid}`);
+    }
+
+    // 2. Doble validación de balance con última hora
+    const asset = par.replace(/EUR|USD$/, '');
+    let balanceEfectivo = await this.getEffectiveBalance(asset);
+    balanceEfectivo = await this.actualizarBalanceEnTiempoReal(asset); // [Nueva función]
+    
+    if (balanceEfectivo < cantidad) {
+      throw new Error(`[BALANCE] ${balanceEfectivo.toFixed(4)} < ${cantidad} | Asset: ${asset}`);
+    }
+
+    // 3. Formateo numérico con validación estricta
+    const volumenFormateado = this.formatearDecimales(cantidad, 'cantidad', par); // [Nueva función]
+    const precioFormateado = this.formatearDecimales(precio, 'precio', par);
+
+    // 4. Delay anti rate-limiting
+    await new Promise(resolve => setTimeout(resolve, DELAY_ANTI_RATELIMIT));
+    
+    // 5. Sistema de reintentos inteligente
+    const order = await this.retryOperation(
+      () => this.api("AddOrder", {
+        pair: par,
+        type: "sell",
+        ordertype: "limit",
+        volume: volumenFormateado,
+        price: precioFormateado,
+        userref: `BOT_${timestamp}_${hashCode(par)}` // ID único por par
+      }),
+      MAX_INTENTOS
+    );
+
+    if (!order?.result?.txid?.[0]) {
+      throw new Error("[KRAKEN] Respuesta inválida sin TXID");
+    }
+
+    console.log(`[${timestamp}] 🧷 Venta LÍMITE ${par} | TXID: ${order.result.txid[0]} | Vol: ${volumenFormateado}`);
+    return { success: true, txid: order.result.txid[0] };
+
+  } catch (error) {
+    const errorDetalle = {
+      code: 'SELL_LIMIT_FAILED',
+      message: this.interpretarErrorKraken(error.error || error.message),
+      params: {
+        par,
+        cantidad_intentada: cantidad,
+        cantidad_formateada: volumenFormateado,
+        precio_intentado: precio,
+        precio_formateado: precioFormateado,
+        balance_efectivo: balanceEfectivo?.toFixed(8)
+      },
+      timestamp,
+      intentos: MAX_INTENTOS
+    };
+    
+    console.error(JSON.stringify(errorDetalle, null, 2));
+    await this.registrarErrorEnDB(errorDetalle); // [Nueva función]
+    
+    return { 
+      success: false, 
+      error: errorDetalle,
+      sugerencia: error.message.includes('DUPLICADO') 
+        ? "Ejecutar 'npm run sincronizar -- --force'" 
+        : "Verificar balances con 'npm run check-balance'"
+    };
+  }
+}
+
+// Función mejorada para cancelar órdenes
+async function cancelOrder(txid) {
+  try {
+    const result = await this.api("CancelOrder", { txid });
+    
+    if (result.result.count === 1) {
+      console.log(`[${format(new Date(), "HH:mm:ss")}] 🗑️ Orden ${txid} cancelada`);
+      return true;
+    }
+    
+    throw new Error(`Error cancelando orden: ${JSON.stringify(result)}`);
+  } catch (error) {
+    console.error(`Cancelación fallida: ${this.interpretarErrorKraken(error.error)}`);
+    return false;
+  }
+}
+
+// Verificador de estado de órdenes
+async function checkOrderExecuted(txid) {
+  try {
+    const response = await this.api("ClosedOrders", { txid });
+    const orden = Object.values(response.result.closed).find(o => o.txid === txid);
+    
+    return orden ? {
+      executed: orden.status === 'closed',
+      price: parseFloat(orden.price),
+      fee: parseFloat(orden.fee),
+      volume: parseFloat(orden.vol_exec)
+    } : null;
+  } catch (error) {
+    console.error(`Verificación orden fallida: ${this.interpretarErrorKraken(error.error)}`);
     return null;
   }
 }
 
 module.exports = {
-  getBalance,
-  getTicker,
-  buy,
-  sell,
+  api: kraken.api.bind(kraken),
+  validarPar,
+  interpretarErrorKraken,
+  getEffectiveBalance,
   sellLimit,
   cancelOrder,
   checkOrderExecuted,
-  validarPar,
-  api: (...args) => kraken.api(...args)
+  getOpenOrders
 };
