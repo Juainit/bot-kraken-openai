@@ -1,220 +1,262 @@
-// ✅ Versión segura y optimizada
-require("dotenv").config();
-const { Pool } = require("pg");
+// tradeManager.js - Versión 4.0 (Producción)
+require('dotenv').config();
+const { Pool } = require('pg');
+const kraken = require('./krakenClient');
+const logger = require('./logger'); // Asume un módulo logger personalizado
+const { ExponentialBackoff } = require('./strategies'); // Estrategia de reintentos
 
-// Configuración de PostgreSQL
+// 1. Configuración de conexión optimizada
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("railway") 
-    ? { rejectUnauthorized: false } 
-    : false
+  ssl: process.env.NODE_ENV === 'production' ? { 
+    rejectUnauthorized: true,
+    ca: process.env.DB_SSL_CERT
+  } : false,
+  max: 15,
+  min: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000
 });
 
-const kraken = require("./krakenClient");
+// 2. Sistema de caché mejorado
+class PriceCache {
+  constructor(ttl = 60000, maxSize = 100) {
+    this.ttl = ttl;
+    this.cache = new Map();
+    this.maxSize = maxSize;
+  }
 
-// Sistema de caché
-const priceCache = new Map();
-const CACHE_DURATION = 60000;
+  get(pair) {
+    const entry = this.cache.get(pair);
+    return entry && Date.now() - entry.timestamp < this.ttl 
+      ? entry.price 
+      : null;
+  }
 
-setInterval(() => {
-  const now = Date.now();
-  priceCache.forEach((value, key) => {
-    if (now - value.timestamp > CACHE_DURATION) priceCache.delete(key);
-  });
-}, 60000);
-
-async function getCachedPrice(pair) {
-  try {
-    const now = Date.now();
-    if (priceCache.has(pair)) {
-      const cached = priceCache.get(pair);
-      if (now - cached.timestamp < CACHE_DURATION) return cached.price;
+  async fetch(pair) {
+    try {
+      const price = await kraken.getTicker(pair);
+      if (this.cache.size >= this.maxSize) {
+        const oldest = this.cache.keys().next().value;
+        this.cache.delete(oldest);
+      }
+      this.cache.set(pair, { price, timestamp: Date.now() });
+      return price;
+    } catch (error) {
+      logger.error(`Price fetch failed for ${pair}`, error);
+      return null;
     }
-    const price = await kraken.getTicker(pair);
-    if (price !== undefined) priceCache.set(pair, { price, timestamp: now });
-    return price;
-  } catch (error) {
-    console.error(`❌ Error al obtener precio de ${pair}:`, error.message);
-    return null;
   }
 }
 
-async function retry(fn, intentos = 3, delay = 1000) {
-  try {
-    return await fn();
-  } catch (err) {
-    if (intentos <= 1) throw err;
-    await new Promise(r => setTimeout(r, delay));
-    return retry(fn, intentos - 1, delay * 2);
-  }
-}
+const priceCache = new PriceCache();
 
-async function actualizarHighestPrice(tradeId, nuevaHighest) {
-  await pool.query(
-    "UPDATE trades SET highestprice = $1 WHERE id = $2",
-    [nuevaHighest, tradeId]
-  );
-}
+// 3. Estrategia de reintentos mejorada
+const tradingRetry = new ExponentialBackoff({
+  maxAttempts: 5,
+  initialDelay: 1000,
+  factor: 3
+});
 
-async function manejarVentaLimit(trade, stopPrice) {
+// 4. Funciones principales
+async function updateHighestPrice(tradeId, newHigh) {
+  const client = await pool.connect();
   try {
-    const orderId = await retry(() => 
-      kraken.sellLimit(trade.pair, trade.quantity, stopPrice), 
-      3
+    await client.query(
+      'UPDATE trades SET highestprice = $1 WHERE id = $2',
+      [newHigh, tradeId]
     );
+    logger.info(`Highest price updated for trade ${tradeId}`);
+  } finally {
+    client.release();
+  }
+}
+
+async function executeLimitSale(trade, stopPrice) {
+  return tradingRetry.execute(async () => {
+    const order = await kraken.sellLimit(trade.pair, trade.quantity, stopPrice);
     await pool.query(
-      "UPDATE trades SET limitorderid = $1 WHERE id = $2",
-      [orderId, trade.id]
+      'UPDATE trades SET limitorderid = $1 WHERE id = $2',
+      [order.txid, trade.id]
     );
-    console.log(`🧾 Orden límite colocada: ${trade.pair} @ ${stopPrice}`);
-  } catch (err) {
-    console.error(`❌ Falló límite ${trade.pair}:`, err.message);
-    await manejarVentaEmergencia(trade, await getCachedPrice(trade.pair));
-  }
+    logger.info(`Limit order placed`, { 
+      pair: trade.pair, 
+      price: stopPrice,
+      txid: order.txid 
+    });
+    return order;
+  });
 }
 
-async function manejarVentaEmergencia(trade, marketPrice) {
+async function emergencySell(trade) {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+    
     if (trade.limitorderid) {
       await kraken.cancelOrder(trade.limitorderid);
-      await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [trade.id]);
+      await client.query(
+        'UPDATE trades SET limitorderid = NULL WHERE id = $1',
+        [trade.id]
+      );
     }
-    const orden = await retry(() => kraken.sell(trade.pair, trade.quantity), 3);
-    const txid = orden.result.txid[0];
-    const ejecucion = await verificarEjecucionOrden(txid);
-    await pool.query("BEGIN");
-    await pool.query(
+
+    const order = await tradingRetry.execute(() => 
+      kraken.sell(trade.pair, trade.quantity)
+    );
+    
+    const execution = await verifyOrderExecution(order.txid);
+    
+    await client.query(
       `UPDATE trades 
        SET status = 'completed', 
            sellprice = $1, 
            feeeur = $2,
            profitpercent = ROUND((($1 - buyprice) / buyprice * 100)::numeric, 2)
        WHERE id = $3`,
-      [ejecucion.price, ejecucion.fee, trade.id]
+      [execution.price, execution.fee, trade.id]
     );
-    await pool.query("COMMIT");
-    console.log(`🚨 Venta EMERGENCIA: ${trade.quantity} ${trade.pair} @ ${ejecucion.price}`);
+    
+    await client.query('COMMIT');
+    logger.warn(`Emergency sale executed`, {
+      pair: trade.pair,
+      price: execution.price
+    });
   } catch (error) {
-    await pool.query("ROLLBACK");
-    console.error(`❌ Falló venta emergencia ${trade.pair}:`, error.message);
-    await pool.query("UPDATE trades SET status = 'failed' WHERE id = $1", [trade.id]);
+    await client.query('ROLLBACK');
+    logger.error(`Emergency sale failed`, { 
+      pair: trade.pair,
+      error: error.message 
+    });
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
-async function verificarEjecucionOrden(txid, intentos = 5) {
-  for (let i = 0; i < intentos; i++) {
-    const estado = await kraken.checkOrderExecuted(txid);
-    if (estado?.status === 'closed') return estado;
-    await new Promise(r => setTimeout(r, 3000));
-  }
-  throw new Error("Orden no ejecutada después de múltiples intentos");
-}
-
-async function verificarDisponibilidadVenta(trade, balance) {
-  const baseAsset = trade.pair.replace(/[^A-Z]/g, "").slice(0, 3);
-  const balanceDisponible = parseFloat(balance[baseAsset] || 0);
-  if (balanceDisponible < trade.quantity * 0.9) {
-    console.warn(`⚠️ Bajo saldo en ${baseAsset}: ${balanceDisponible}`);
-    return false;
-  }
-  return true;
-}
-
-async function updateTrades() {
+// 5. Lógica central mejorada
+async function processActiveTrades() {
+  const client = await pool.connect();
   try {
-    // 1. Obtener trades activos con todos los campos necesarios
-    const { rows: tradesActivos } = await pool.query(`
+    const { rows: activeTrades } = await client.query(`
       SELECT 
         id, pair, quantity, buyprice, highestprice, 
         stoppercent, limitorderid, createdat
       FROM trades 
       WHERE status = 'active'
+      FOR UPDATE SKIP LOCKED
     `);
-    
-    if (!tradesActivos.length) {
-      console.log("⏭ No hay trades activos");
+
+    if (!activeTrades.length) {
+      logger.info('No active trades to process');
       return;
     }
 
-    // 2. Obtener precios y balance en paralelo para eficiencia
-    const [precios, balance] = await Promise.all([
-      Promise.allSettled(tradesActivos.map(trade => getCachedPrice(trade.pair))),
-      retry(() => kraken.getBalance(), 3)
+    const [prices, balance] = await Promise.all([
+      Promise.all(activeTrades.map(t => 
+        priceCache.get(t.pair) || priceCache.fetch(t.pair)
+      ),
+      kraken.getEffectiveBalances()
     ]);
 
-    if (!balance || Object.keys(balance).length === 0) {
-      console.warn("⚠️ Balance no disponible - Ciclo omitido");
-      return;
-    }
-
-    // 3. Procesar cada trade con validaciones mejoradas
-    for (const [i, trade] of tradesActivos.entries()) {
-      const { id, pair, createdat, limitorderid, quantity } = trade;
-      
-      // Validación de trade reciente (2 minutos de protección)
-      if (Date.now() - new Date(createdat).getTime() < 120000) {
-        console.log(`⏳ ${pair}: Trade muy reciente`);
-        continue;
+    await Promise.all(activeTrades.map(async (trade, index) => {
+      if (Date.now() - trade.createdat.getTime() < 120000) {
+        logger.debug('Skipping recent trade', { pair: trade.pair });
+        return;
       }
 
-      // ===== [NUEVO] Validación de saldo en tiempo real =====
-      const asset = pair.replace(/USD$|EUR$/, '');
-      const saldoActual = parseFloat(balance[asset] || 0);
-      
-      if (saldoActual < quantity) {
-        console.log(`🛑 Saldo insuficiente: ${pair} (${saldoActual} < ${quantity})`);
-        await pool.query("UPDATE trades SET status='failed' WHERE id=$1", [id]);
-        continue;
-      }
-      // ======================================================
-
-      const marketPrice = precios[i]?.value;
+      const marketPrice = prices[index];
       if (!marketPrice) {
-        console.warn(`⚠️ ${pair}: Precio no disponible`);
-        continue;
+        logger.warn('Missing price data', { pair: trade.pair });
+        return;
       }
 
-      // Lógica de trailing stop
-      const nuevaHighest = Math.max(trade.highestprice, marketPrice);
-      const trailingValue = nuevaHighest * (trade.stoppercent / 100);
-      const stopPrice = nuevaHighest - trailingValue;
-      
-      // Niveles clave para toma de decisiones
-      const limiteVenta = nuevaHighest - (trailingValue * 0.98);
-      const nivelEmergencia = stopPrice - (trailingValue * 0.02);
-
-      // Actualizar precio máximo si es necesario
-      if (nuevaHighest > trade.highestprice) {
-        await actualizarHighestPrice(trade.id, nuevaHighest);
-        
-        // [NUEVO] Cancelar orden previa con delay de 2s
-        if (limitorderid) {
-          await kraken.cancelOrder(limitorderid);
-          await pool.query("UPDATE trades SET limitorderid = NULL WHERE id = $1", [trade.id]);
-          console.log(`🛑 Orden cancelada: ${pair}`);
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Evitar rate limit
-        }
+      const newHigh = Math.max(trade.highestprice, marketPrice);
+      if (newHigh > trade.highestprice) {
+        await updateHighestPrice(trade.id, newHigh);
+        await cancelExistingOrder(trade);
       }
 
-      // Estrategia de venta
-      if (marketPrice <= limiteVenta) {
-        await manejarVentaLimit(trade, stopPrice);
-      } else if (marketPrice <= nivelEmergencia) {
-        await manejarVentaEmergencia(trade, marketPrice);
-      }
-
-      // [NUEVO] Verificación final de disponibilidad
-      const puedeVender = await verificarDisponibilidadVenta(trade, balance);
-      if (!puedeVender) {
-        console.warn(`⏸️ ${pair}: Saldo insuficiente post-validación`);
-      }
-    }
-  } catch (err) {
-    console.error("❌ Error crítico en updateTrades:", err.message);
-    // [NUEVO] Notificar a sistema de monitoreo externo
-    // enviarAlertaSlack(`Fallo en updateTrades: ${err.message}`);
+      const stopPrice = calculateStopPrice(newHigh, trade.stoppercent);
+      await evaluateSaleConditions(trade, marketPrice, stopPrice, balance);
+    }));
+    
+  } catch (error) {
+    logger.error('Trade processing failed', error);
+  } finally {
+    client.release();
   }
 }
 
-// Ejecutar cada 3 minutos
-setInterval(updateTrades, 180000);
+// 6. Funciones auxiliares optimizadas
+async function cancelExistingOrder(trade) {
+  if (trade.limitorderid) {
+    await kraken.cancelOrder(trade.limitorderid);
+    await pool.query(
+      'UPDATE trades SET limitorderid = NULL WHERE id = $1',
+      [trade.id]
+    );
+    logger.info('Order cancelled', { 
+      pair: trade.pair,
+      txid: trade.limitorderid 
+    });
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+}
+
+function calculateStopPrice(high, percent) {
+  return high * (1 - (percent / 100));
+}
+
+async function evaluateSaleConditions(trade, marketPrice, stopPrice, balance) {
+  const asset = trade.pair.replace(/EUR|USD$/, '');
+  
+  if ((balance[asset] || 0) < trade.quantity * 0.9) {
+    logger.warn('Insufficient balance', { 
+      pair: trade.pair,
+      required: trade.quantity,
+      available: balance[asset]
+    });
+    await pool.query(
+      'UPDATE trades SET status = $1 WHERE id = $2',
+      ['failed', trade.id]
+    );
+    return;
+  }
+
+  if (marketPrice <= stopPrice * 0.98) {
+    await executeLimitSale(trade, stopPrice);
+  } else if (marketPrice <= stopPrice * 0.95) {
+    await emergencySell(trade);
+  }
+}
+
+// 7. Configuración de intervalo segura
+const interval = setInterval(() => {
+  processActiveTrades().catch(error => 
+    logger.error('Interval processing failed', error)
+  );
+}, process.env.TRADE_INTERVAL || 180000);
+
+// 8. Manejo de cierre limpio
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+async function gracefulShutdown() {
+  clearInterval(interval);
+  logger.info('Shutting down trade manager');
+  
+  try {
+    await pool.end();
+    logger.info('Database pool closed');
+    process.exit(0);
+  } catch (error) {
+    logger.error('Shutdown error', error);
+    process.exit(1);
+  }
+}
+
+module.exports = {
+  processActiveTrades,
+  gracefulShutdown
+};
