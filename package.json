@@ -4,7 +4,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "sincronizar": "node src/sincronizador.js",  // [2] Nombre corregido
+    "sincronizar": "node src/sincronizador.js",
     "check-orders": "node scripts/checkOrders.js",
     "venta-limit": "node scripts/ventaLimit.js",
     "test": "NODE_ENV=test jest --verbose",
